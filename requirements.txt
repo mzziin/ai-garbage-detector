@@ -4,3 +4,4 @@ ultralytics
 numpy
 Pillow
 plotly
+lap

@@ -152,13 +152,26 @@ def main():
     tracker = ObjectTracker()
     analyzer = DumpAnalyzer()
 
-    # Open camera
+    # Open camera with retries
     print(f"[LiveMonitor] Opening camera source: {source}")
-    cap = cv2.VideoCapture(source)
+    cap = None
+    for attempt in range(5):
+        cap = cv2.VideoCapture(source)
+        if cap.isOpened():
+            break
+        print(f"[LiveMonitor] Attempt {attempt + 1}/5 failed to open camera. Retrying in 2s...")
+        cap.release()
+        time.sleep(2)
 
-    if not cap.isOpened():
+    if cap is None or not cap.isOpened():
         print(f"[LiveMonitor] ERROR: Could not open camera source: {source}")
         sys.exit(1)
+
+    # Warm-up: some webcams need a few frames before they produce valid output
+    print("[LiveMonitor] Warming up camera (reading initial frames)...")
+    for _ in range(10):
+        cap.read()
+        time.sleep(0.05)
 
     print("[LiveMonitor] Camera opened successfully. Press Q to quit.")
 
@@ -169,14 +182,20 @@ def main():
     fps = 0.0
     frame_time = time.time()
     incident_count = 0
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 50
 
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
-                print("[LiveMonitor] Failed to read frame. Retrying...")
-                time.sleep(0.1)
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    print(f"[LiveMonitor] {MAX_CONSECUTIVE_FAILURES} consecutive read failures. Exiting.")
+                    break
+                time.sleep(0.05)
                 continue
+            consecutive_failures = 0
 
             # Calculate FPS
             now = time.time()

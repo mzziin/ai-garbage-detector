@@ -183,8 +183,9 @@ def page_live_monitor():
                 process = subprocess.Popen(
                     cmd,
                     cwd=os.path.dirname(os.path.abspath(__file__)),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
                 )
                 st.session_state.monitor_processes[selected_camera_id] = {
                     "process": process,
