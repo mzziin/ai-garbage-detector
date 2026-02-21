@@ -5,37 +5,78 @@ from collections import defaultdict
 from config import (
     PROXIMITY_THRESHOLD, FRAME_ACCUMULATION_THRESHOLD, COOLDOWN_SECONDS,
     WEIGHT_DETECTION, WEIGHT_TEMPORAL, WEIGHT_ACCUMULATION,
-    WASTE_PERSISTENCE_FRAMES, DEFAULT_SAFE_ZONES
+    WASTE_PERSISTENCE_FRAMES, DEFAULT_SAFE_ZONES,
+    STATIONARY_THRESHOLD, PERSON_LEFT_FRAMES
 )
 
 
 class DumpEvent:
-    """Tracks the accumulation of evidence for a potential dump event."""
+    """Tracks the accumulation of evidence for a potential dump event using a state machine."""
 
-    def __init__(self, waste_track_id, person_track_id):
+    def __init__(self, waste_track_id, person_track_id, initial_center):
         self.waste_track_id = waste_track_id
         self.person_track_id = person_track_id
         self.accumulated_frames = 0
         self.detection_confidences = []
         self.temporal_scores = []
         self.first_detected = time.time()
+        
+        # State Machine Variables
+        self.person_is_near = True
+        self.person_was_near_count = 0
+        self.person_has_left = False
+        self.frames_since_left = 0
+        self.initial_waste_center = initial_center
+        self.is_stationary = True
         self.confirmed = False
 
-    def accumulate(self, detection_conf, temporal_score):
-        """Add one frame of evidence."""
-        self.accumulated_frames += 1
-        self.detection_confidences.append(detection_conf)
-        self.temporal_scores.append(temporal_score)
+    def update_state(self, is_near, current_center, detection_conf, temporal_score):
+        """Update the state machine with current frame information."""
+        self.person_is_near = is_near
+        
+        # 1. Check if waste is still stationary
+        dist_moved = math.sqrt(
+            (current_center[0] - self.initial_waste_center[0])**2 +
+            (current_center[1] - self.initial_waste_center[1])**2
+        )
+        if dist_moved > STATIONARY_THRESHOLD:
+            self.is_stationary = False
+        
+        # 2. Accumulate evidence while person is near
+        if is_near:
+            self.person_was_near_count += 1
+            self.frames_since_left = 0
+            self.person_has_left = False
+            self.accumulated_frames += 1
+            self.detection_confidences.append(detection_conf)
+            self.temporal_scores.append(temporal_score)
+        else:
+            # 3. Handle person leaving
+            if self.person_was_near_count >= FRAME_ACCUMULATION_THRESHOLD:
+                self.person_has_left = True
+                self.frames_since_left += 1
 
     def reset(self):
         """Reset accumulation if conditions stop being met."""
         self.accumulated_frames = 0
+        self.person_was_near_count = 0
+        self.frames_since_left = 0
+        self.person_has_left = False
         self.detection_confidences.clear()
         self.temporal_scores.clear()
 
     def is_confirmed(self):
-        """Check if enough frames have accumulated to confirm the event."""
-        return self.accumulated_frames >= FRAME_ACCUMULATION_THRESHOLD
+        """
+        Confirm ONLY if:
+        - Person was near for enough frames
+        - Person has now moved away
+        - Waste has remained stationary
+        """
+        return (
+            self.person_has_left and 
+            self.frames_since_left >= PERSON_LEFT_FRAMES and
+            self.is_stationary
+        )
 
     def final_confidence(self):
         """Calculate weighted final confidence score."""
@@ -44,12 +85,11 @@ class DumpEvent:
 
         avg_detection = sum(self.detection_confidences) / len(self.detection_confidences)
         avg_temporal = sum(self.temporal_scores) / len(self.temporal_scores) if self.temporal_scores else 0.0
-        accumulation_score = min(self.accumulated_frames / FRAME_ACCUMULATION_THRESHOLD, 1.0)
-
+        # For simplicity, keep similar scoring but ensure it reflects the state
         score = (
             WEIGHT_DETECTION * avg_detection +
             WEIGHT_TEMPORAL * avg_temporal +
-            WEIGHT_ACCUMULATION * accumulation_score
+            WEIGHT_ACCUMULATION * 1.0  # Already passed accumulation threshold
         )
         return round(min(score, 1.0), 3)
 
@@ -59,7 +99,11 @@ class DumpAnalyzer:
     Core intelligence module that combines detection, tracking, and
     temporal data to determine if an illegal dumping event has occurred.
 
-    Logic: person near new waste → person leaves → waste stays = DUMPING
+    Logic: 
+    1. Person near new waste for N frames (STATIONARY check starts).
+    2. Person moves away from waste.
+    3. Waste remains stationary for M frames after person left.
+    4. Trigger!
     """
 
     def __init__(self, safe_zones=None):
@@ -81,6 +125,9 @@ class DumpAnalyzer:
         new_waste = tracked_data["new_waste"]
         persons = tracked_data["persons"]
 
+        # Track grid regions with ANY waste in this frame
+        active_waste_ids = {w.track_id for w in new_waste}
+
         # Check each new waste object
         for waste_obj in new_waste:
             # Skip if in a safe zone
@@ -96,35 +143,59 @@ class DumpAnalyzer:
                     closest_dist = dist
                     closest_person = person
 
-            if closest_person is None or closest_dist > PROXIMITY_THRESHOLD:
-                # No person nearby — reset any active event for this waste
-                self._reset_events_for_waste(waste_obj.track_id)
-                continue
-
-            # Calculate scores
-            detection_conf = waste_obj.confidence
-            temporal_score = self._temporal_score(waste_obj)
+            is_near = (closest_person is not None and closest_dist <= PROXIMITY_THRESHOLD)
 
             # Get or create event
-            event_key = (waste_obj.track_id, closest_person.track_id)
-            if event_key not in self.active_events:
-                self.active_events[event_key] = DumpEvent(
-                    waste_obj.track_id, closest_person.track_id
-                )
-
-            event = self.active_events[event_key]
-            event.accumulate(detection_conf, temporal_score)
+            # We track by waste ID and the person who was MOST RECENTLY near it
+            # To handle multiple people, we iterate active events later
+            event_key = waste_obj.track_id
+            
+            if is_near:
+                person_id = closest_person.track_id
+                if event_key not in self.active_events:
+                    self.active_events[event_key] = DumpEvent(
+                        waste_obj.track_id, person_id, waste_obj.center()
+                    )
+                
+                event = self.active_events[event_key]
+                # If a DIFFERENT person is now nearer, we update the person_track_id?
+                # Actually, ByteTrack IDs should be stable. Let's keep the first one 
+                # or the closest one.
+                event.person_track_id = person_id 
+                event.update_state(True, waste_obj.center(), waste_obj.confidence, self._temporal_score(waste_obj))
+            elif event_key in self.active_events:
+                # Person left
+                event = self.active_events[event_key]
+                event.update_state(False, waste_obj.center(), 0, 0) # Confidences don't matter as much once left
 
             # Check if confirmed
-            if event.is_confirmed() and not event.confirmed:
-                # Check cooldown
-                region_key = self._region_key(waste_obj.box)
-                if not self._is_in_cooldown(region_key):
-                    event.confirmed = True
-                    self.cooldown_log[region_key] = time.time()
-                    confirmed_events.append(event)
+            if event_key in self.active_events:
+                event = self.active_events[event_key]
+                if event.is_confirmed() and not event.confirmed:
+                    # Final stationary verification (waste must exist and not have moved)
+                    if event.is_stationary:
+                        # Check cooldown
+                        region_key = self._region_key(waste_obj.box)
+                        if not self._is_in_cooldown(region_key):
+                            event.confirmed = True
+                            self.cooldown_log[region_key] = time.time()
+                            confirmed_events.append(event)
+                
+                # If waste moved too much while person was near OR after, reset/invalidate
+                if not event.is_stationary:
+                    self.active_events[event_key].reset()
+                    self.active_events[event_key].is_stationary = True # Reset stationary flag for next attempt
+                    self.active_events[event_key].initial_waste_center = waste_obj.center()
 
-        # Clean up old events that haven't accumulated
+        # Clean up events for waste that is NO LONGER detected
+        # (Wait... if it's no longer detected, maybe it was picked up? That's fine.)
+        keys_to_remove = [k for k in self.active_events if k not in active_waste_ids]
+        for k in keys_to_remove:
+            # If the person left and THEN the waste disappeared, maybe it was a false positive detection
+            # or it was picked up. We don't trigger if it disappeared.
+            del self.active_events[k]
+
+        # Clean up stale/old events
         self._cleanup_stale_events()
 
         return confirmed_events
@@ -164,14 +235,6 @@ class DumpAnalyzer:
         cx = (box[0] + box[2]) // 2
         cy = (box[1] + box[3]) // 2
         return (cx // grid_size, cy // grid_size)
-
-    def _reset_events_for_waste(self, waste_track_id):
-        """Reset any active events involving this waste object."""
-        keys_to_reset = [
-            k for k in self.active_events if k[0] == waste_track_id
-        ]
-        for k in keys_to_reset:
-            self.active_events[k].reset()
 
     def _cleanup_stale_events(self, max_age_seconds=60):
         """Remove events that are too old and never confirmed."""

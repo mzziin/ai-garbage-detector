@@ -318,8 +318,18 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
         with st.spinner("Loading AI models (first time only)..."):
             from detector import Detector
             st.session_state["detector_instance"] = Detector()
+    
+    if "tracker_instance" not in st.session_state:
+        from tracker import ObjectTracker
+        st.session_state["tracker_instance"] = ObjectTracker()
+        
+    if "analyzer_instance" not in st.session_state:
+        from dump_analyzer import DumpAnalyzer
+        st.session_state["analyzer_instance"] = DumpAnalyzer()
 
     detector = st.session_state["detector_instance"]
+    tracker = st.session_state["tracker_instance"]
+    analyzer = st.session_state["analyzer_instance"]
 
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
@@ -345,24 +355,9 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
     alert_message = ""
     scale_x, scale_y = 1.0, 1.0
 
-    from config import PROXIMITY_THRESHOLD as _PT
-    PROXIMITY_THRESHOLD = _PT
+    scale_x, scale_y = 1.0, 1.0
 
-    # ---- Dump detection state machine ----
-    # Tracks waste regions across frames to detect:
-    #   person near waste → person leaves → waste stays = DUMPING
-    # Holding a bottle won't trigger because the person never leaves.
-    waste_tracker = {}          # key: (grid_x, grid_y) -> state dict
-    GRID_SIZE = 80              # Pixel grid for matching waste across frames
-    FRAMES_PERSON_NEAR = 3     # Min inference frames person must be near waste
-    FRAMES_AFTER_LEFT = 5      # Min inference frames waste must persist after person left
-    COOLDOWN_FRAMES = 30       # Ignore same region after confirming an incident
-    cooldown_regions = {}       # key: (grid_x, grid_y) -> remaining cooldown frames
 
-    def _waste_grid(box):
-        cx = (box[0] + box[2]) // 2
-        cy = (box[1] + box[3]) // 2
-        return (cx // GRID_SIZE, cy // GRID_SIZE)
 
     # Process frames in batches to allow Streamlit to handle UI interactions
     # (e.g., Stop button). After each batch, st.rerun() gives the event loop a chance.
@@ -398,7 +393,10 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
                 scale_x = orig_w / INFER_WIDTH
                 scale_y = orig_h / small_h
 
-                detections = detector.detect_for_video(small)
+                detections = detector.detect(small)
+                
+                # Update tracker with detections
+                tracked_data = tracker.update(detections)
                 last_persons = detections["persons"]
                 last_waste = detections["waste"]
 
@@ -411,73 +409,36 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
                         int(det["box"][3] * scale_y),
                     ]
 
-                # ---- Dump state machine update ----
-                # Tick down cooldowns
-                for region in list(cooldown_regions):
-                    cooldown_regions[region] -= 1
-                    if cooldown_regions[region] <= 0:
-                        del cooldown_regions[region]
-
-                active_waste_grids = set()
-                last_alert = False
-                alert_message = ""
-
-                for w in last_waste:
-                    grid = _waste_grid(w["box"])
-                    active_waste_grids.add(grid)
-
-                    if grid in cooldown_regions:
-                        continue
-
-                    # Check if any person is near this waste
-                    wx = (w["box"][0] + w["box"][2]) // 2
-                    wy = (w["box"][1] + w["box"][3]) // 2
-                    person_nearby = False
-                    for p in last_persons:
-                        px = (p["box"][0] + p["box"][2]) // 2
-                        py = (p["box"][1] + p["box"][3]) // 2
-                        dist = ((wx - px)**2 + (wy - py)**2) ** 0.5
-                        if dist <= PROXIMITY_THRESHOLD:
-                            person_nearby = True
-                            break
-
-                    # Update state for this waste region
-                    if grid not in waste_tracker:
-                        waste_tracker[grid] = {
-                            "person_near_count": 0,
-                            "person_was_near": False,
-                            "person_left": False,
-                            "frames_without_person": 0,
-                            "confirmed": False,
-                        }
-
-                    state = waste_tracker[grid]
-
-                    if person_nearby:
-                        state["person_near_count"] += 1
-                        state["frames_without_person"] = 0
-                        state["person_left"] = False
-                        if state["person_near_count"] >= FRAMES_PERSON_NEAR:
-                            state["person_was_near"] = True
-                    else:
-                        if state["person_was_near"]:
-                            state["person_left"] = True
-                            state["frames_without_person"] += 1
-
-                    # Confirm: person was near -> left -> waste still here
-                    if (state["person_was_near"] and
-                            state["person_left"] and
-                            state["frames_without_person"] >= FRAMES_AFTER_LEFT and
-                            not state["confirmed"]):
-                        state["confirmed"] = True
-                        last_alert = True
-                        alert_message = "!! ILLEGAL DUMPING DETECTED !!"
-                        cooldown_regions[grid] = COOLDOWN_FRAMES
-
-                # Clean up stale waste trackers
-                for grid in list(waste_tracker):
-                    if grid not in active_waste_grids:
-                        del waste_tracker[grid]
+                # Run analyzer
+                confirmed_events = analyzer.analyze(tracked_data)
+                
+                last_alert = len(confirmed_events) > 0
+                if last_alert:
+                    alert_message = "!! ILLEGAL DUMPING DETECTED !!"
+                    
+                    # Log to database
+                    from database import insert_incident
+                    for event in confirmed_events:
+                        # Save evidence snapshot
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        snapshot_name = f"dash_{selected_camera_id}_{timestamp}.jpg"
+                        snapshot_path = os.path.join(EVIDENCE_DIR, snapshot_name)
+                        cv2.imwrite(snapshot_path, frame)
+                        
+                        # Get object names
+                        objects = []
+                        for w in last_waste:
+                            if w["track_id"] == event.waste_track_id:
+                                objects.append(w["class_name"])
+                                break
+                        
+                        insert_incident(
+                            camera_id=selected_camera_id,
+                            confidence=event.final_confidence(),
+                            snapshot_path=snapshot_path,
+                            description=f"Automated dashboard detection: Person #{event.person_track_id} dumped waste.",
+                            objects_detected=objects
+                        )
 
                 detection_text.markdown(
                     f"**Persons:** {len(last_persons)} | **Waste:** {len(last_waste)}"

@@ -64,6 +64,12 @@ BACKGROUND_HISTORY_FRAMES = 60
 # to be considered "dumped" (vs. temporarily placed)
 WASTE_PERSISTENCE_FRAMES = 15
 
+# Maximum pixel movement allowed for waste to be considered "stationary"
+STATIONARY_THRESHOLD = 20
+
+# Number of frames to wait after person leaves before confirming a dump
+PERSON_LEFT_FRAMES = 10
+
 # ============================================================
 # Video Processing
 # ============================================================
