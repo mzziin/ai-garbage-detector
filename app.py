@@ -328,6 +328,20 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
     status_text.markdown("🟢 **Live**")
     prev_time = time.time()
 
+    # Performance settings
+    INFER_EVERY_N = 3          # Run AI every Nth frame; show raw feed in between
+    INFER_WIDTH = 640          # Resize frame to this width before inference
+    USE_POSE = (DEVICE == "cuda")  # Pose estimation only on GPU (too slow on CPU)
+
+    frame_count = 0
+    last_persons = []
+    last_waste = []
+    last_poses = []
+    last_alert = False
+    scale_x, scale_y = 1.0, 1.0  # Scale factors to map detections back to original
+
+    from config import PROXIMITY_THRESHOLD
+
     try:
         while st.session_state.get("dashboard_streaming", False):
             ret, frame = cap.read()
@@ -338,33 +352,75 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
                 cap = cv2.VideoCapture(source)
                 continue
 
+            frame_count += 1
+
             # Calculate FPS
             now = time.time()
             fps = 1.0 / max(now - prev_time, 0.001)
             prev_time = now
             fps_text.markdown(f"**FPS:** {fps:.1f}")
 
-            # Run detection
-            detections = detector.detect_for_video(frame)
-            poses = detector.detect_pose_for_video(frame)
+            # Run AI inference only every Nth frame
+            if frame_count % INFER_EVERY_N == 0:
+                orig_h, orig_w = frame.shape[:2]
+                ratio = INFER_WIDTH / orig_w
+                small_h = int(orig_h * ratio)
+                small = cv2.resize(frame, (INFER_WIDTH, small_h))
 
-            persons = detections["persons"]
-            waste = detections["waste"]
+                scale_x = orig_w / INFER_WIDTH
+                scale_y = orig_h / small_h
 
-            detection_text.markdown(
-                f"**Persons:** {len(persons)} | **Waste:** {len(waste)}"
-            )
+                detections = detector.detect_for_video(small)
+                last_persons = detections["persons"]
+                last_waste = detections["waste"]
 
-            # Draw detections on frame
+                # Scale boxes back to original resolution
+                for det in last_persons + last_waste:
+                    det["box"] = [
+                        int(det["box"][0] * scale_x),
+                        int(det["box"][1] * scale_y),
+                        int(det["box"][2] * scale_x),
+                        int(det["box"][3] * scale_y),
+                    ]
+
+                if USE_POSE:
+                    last_poses = detector.detect_pose_for_video(small)
+                    for pose in last_poses:
+                        pose["keypoints"][:, 0] *= scale_x
+                        pose["keypoints"][:, 1] *= scale_y
+                else:
+                    last_poses = []
+
+                # Proximity check
+                last_alert = False
+                if last_persons and last_waste:
+                    for w in last_waste:
+                        wx = (w["box"][0] + w["box"][2]) // 2
+                        wy = (w["box"][1] + w["box"][3]) // 2
+                        for p in last_persons:
+                            px = (p["box"][0] + p["box"][2]) // 2
+                            py = (p["box"][1] + p["box"][3]) // 2
+                            dist = ((wx - px)**2 + (wy - py)**2) ** 0.5
+                            if dist <= PROXIMITY_THRESHOLD:
+                                last_alert = True
+                                break
+                        if last_alert:
+                            break
+
+                detection_text.markdown(
+                    f"**Persons:** {len(last_persons)} | **Waste:** {len(last_waste)}"
+                )
+
+            # Draw cached detections on current frame
             display = frame.copy()
 
-            for det in persons:
+            for det in last_persons:
                 x1, y1, x2, y2 = det["box"]
                 cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.putText(display, f"Person ({det['confidence']:.2f})",
                             (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-            for det in waste:
+            for det in last_waste:
                 x1, y1, x2, y2 = det["box"]
                 cv2.rectangle(display, (x1, y1), (x2, y2), (0, 0, 255), 2)
                 cv2.putText(display, f"{det['class_name']} ({det['confidence']:.2f})",
@@ -376,7 +432,7 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
                 (5, 11), (6, 12), (11, 12),
                 (11, 13), (13, 15), (12, 14), (14, 16)
             ]
-            for pose in poses:
+            for pose in last_poses:
                 kps = pose["keypoints"]
                 for i, j in skeleton:
                     if kps[i][2] > 0.3 and kps[j][2] > 0.3:
@@ -384,30 +440,17 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
                         pt2 = (int(kps[j][0]), int(kps[j][1]))
                         cv2.line(display, pt1, pt2, (255, 165, 0), 2)
 
-            # Check for proximity-based dump detection
-            if persons and waste:
-                from config import PROXIMITY_THRESHOLD
-                alert_shown = False
-                for w in waste:
-                    if alert_shown:
-                        break
-                    wx = (w["box"][0] + w["box"][2]) // 2
-                    wy = (w["box"][1] + w["box"][3]) // 2
-                    for p in persons:
-                        px = (p["box"][0] + p["box"][2]) // 2
-                        py = (p["box"][1] + p["box"][3]) // 2
-                        dist = ((wx - px)**2 + (wy - py)**2) ** 0.5
-                        if dist <= PROXIMITY_THRESHOLD:
-                            h, ww = display.shape[:2]
-                            cv2.rectangle(display, (0, 0), (ww - 1, h - 1), (0, 0, 255), 6)
-                            cv2.putText(display, "!! POTENTIAL DUMPING !!",
-                                        (ww // 2 - 200, 40),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
-                            alert_shown = True
-                            break
+            # Alert overlay
+            if last_alert:
+                h, ww = display.shape[:2]
+                cv2.rectangle(display, (0, 0), (ww - 1, h - 1), (0, 0, 255), 6)
+                cv2.putText(display, "!! POTENTIAL DUMPING !!",
+                            (ww // 2 - 200, 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
 
             # OSD
-            cv2.putText(display, f"FPS: {fps:.1f} | Device: {DEVICE.upper()}",
+            mode = "AI" if frame_count % INFER_EVERY_N == 0 else "PASS"
+            cv2.putText(display, f"FPS: {fps:.1f} | {DEVICE.upper()} | {mode}",
                         (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
             # Convert BGR to RGB for Streamlit
