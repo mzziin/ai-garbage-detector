@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+data/garbage_detect.db
+data/uploads/
+data/evidence/
+*.pt
+*.onnx
+.env
