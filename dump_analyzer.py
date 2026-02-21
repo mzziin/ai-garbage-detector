@@ -150,7 +150,7 @@ class DumpAnalyzer:
                     confirmed_events.append(event)
 
         # Clean up old events that haven't accumulated
-        self._cleanup_stale_events(tracked_data["frame_count"])
+        self._cleanup_stale_events()
 
         return confirmed_events
 
@@ -294,7 +294,7 @@ class DumpAnalyzer:
         for k in keys_to_reset:
             self.active_events[k].reset()
 
-    def _cleanup_stale_events(self, current_frame, max_age_seconds=60):
+    def _cleanup_stale_events(self, max_age_seconds=60):
         """Remove events that are too old and never confirmed."""
         now = time.time()
         keys_to_remove = []

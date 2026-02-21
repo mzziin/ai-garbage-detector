@@ -10,10 +10,8 @@ import cv2
 import json
 from datetime import datetime
 
-from config import EVIDENCE_DIR, VIDEO_FRAME_SAMPLE_RATE, DEVICE
+from config import EVIDENCE_DIR, VIDEO_FRAME_SAMPLE_RATE, DEVICE, PROXIMITY_THRESHOLD
 from detector import Detector
-from tracker import ObjectTracker
-from dump_analyzer import DumpAnalyzer
 from database import (
     update_video_upload, insert_video_detection
 )
@@ -49,8 +47,6 @@ def process_video(upload_id, video_path, progress_callback=None):
 
     # Initialize detection components
     detector = Detector()
-    tracker = ObjectTracker()
-    analyzer = DumpAnalyzer()
 
     processed_count = 0
     incidents_found = 0
@@ -95,7 +91,6 @@ def process_video(upload_id, video_path, progress_callback=None):
 
                         dist = ((wx - px) ** 2 + (wy - py) ** 2) ** 0.5
 
-                        from config import PROXIMITY_THRESHOLD
                         if dist <= PROXIMITY_THRESHOLD:
                             # Check pose for throwing action
                             pose_score = 0.0
@@ -108,9 +103,11 @@ def process_video(upload_id, video_path, progress_callback=None):
                                             kps[wrist_idx][1] > kps[elbow_idx][1]):
                                         pose_score = max(pose_score, 0.6)
 
-                            # Calculate confidence
+                            # Calculate confidence — weighted by detection and pose evidence
                             detection_conf = (waste_obj["confidence"] + person["confidence"]) / 2
-                            confidence = detection_conf * 0.5 + pose_score * 0.3 + 0.2
+                            # Proximity factor: small bonus for person being near waste (scales with closeness)
+                            proximity_factor = max(0, 1.0 - dist / PROXIMITY_THRESHOLD) * 0.2
+                            confidence = detection_conf * 0.5 + pose_score * 0.3 + proximity_factor
 
                             if confidence > 0.3:
                                 # Save snapshot

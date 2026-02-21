@@ -22,6 +22,9 @@ class TrackedObject:
         self.confidence = confidence
         self.last_seen_frame = frame_number
         self.frames_seen += 1
+        # Bug 14 fix: transition is_new to False after enough frames
+        if self.is_new and self.frames_seen >= WASTE_PERSISTENCE_FRAMES:
+            self.is_new = False
 
     def center(self):
         """Get center point of bounding box."""

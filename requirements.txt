@@ -4,4 +4,6 @@ ultralytics
 numpy
 Pillow
 plotly
+pandas
+torch
 lap

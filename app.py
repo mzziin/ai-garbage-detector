@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import subprocess
+import platform
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -95,7 +96,7 @@ def page_dashboard():
             with st.expander(
                 f"🚨 Incident #{incident['id']} — "
                 f"{incident['timestamp']} — "
-                f"Confidence: {incident['confidence']:.1%}" if incident['confidence'] else
+                f"Confidence: {incident['confidence']:.1%}" if incident['confidence'] is not None else
                 f"🚨 Incident #{incident['id']} — {incident['timestamp']}"
             ):
                 col_img, col_info = st.columns([1, 2])
@@ -110,7 +111,7 @@ def page_dashboard():
                 with col_info:
                     st.markdown(f"**Description:** {incident['description']}")
                     st.markdown(f"**Camera ID:** {incident['camera_id']}")
-                    st.markdown(f"**Confidence:** {incident['confidence']:.1%}" if incident['confidence'] else "**Confidence:** N/A")
+                    st.markdown(f"**Confidence:** {incident['confidence']:.1%}" if incident['confidence'] is not None else "**Confidence:** N/A")
                     if incident["objects_detected"]:
                         try:
                             objects = json.loads(incident["objects_detected"])
@@ -203,7 +204,8 @@ def _render_opencv_monitor(selected_camera_id, selected_camera):
                     cwd=os.path.dirname(os.path.abspath(__file__)),
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                    **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                       if platform.system() == "Windows" else {})
                 )
                 st.session_state.monitor_processes[selected_camera_id] = {
                     "process": process,
@@ -237,6 +239,7 @@ def _render_opencv_monitor(selected_camera_id, selected_camera):
     st.subheader("Active Monitors")
 
     active = False
+    stopped_cam_ids = []
     for cam_id, info in list(st.session_state.monitor_processes.items()):
         proc = info["process"]
         is_running = proc.poll() is None
@@ -251,7 +254,11 @@ def _render_opencv_monitor(selected_camera_id, selected_camera):
             st.markdown(
                 f"⚫ **{info['camera_name']}** — Stopped"
             )
-            del st.session_state.monitor_processes[cam_id]
+            stopped_cam_ids.append(cam_id)
+
+    # Clean up stopped monitors outside the display loop
+    for cam_id in stopped_cam_ids:
+        del st.session_state.monitor_processes[cam_id]
 
     if not active:
         st.info("No active monitors. Select a camera and click Start.")
@@ -341,7 +348,8 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
     alert_message = ""
     scale_x, scale_y = 1.0, 1.0
 
-    from config import PROXIMITY_THRESHOLD
+    from config import PROXIMITY_THRESHOLD as _PT
+    PROXIMITY_THRESHOLD = _PT
 
     # ---- Dump detection state machine ----
     # Tracks waste regions across frames to detect:
@@ -359,6 +367,11 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
         cy = (box[1] + box[3]) // 2
         return (cx // GRID_SIZE, cy // GRID_SIZE)
 
+    # Process frames in batches to allow Streamlit to handle UI interactions
+    # (e.g., Stop button). After each batch, st.rerun() gives the event loop a chance.
+    MAX_FRAMES_PER_BATCH = 100
+    batch_frame_count = 0
+
     try:
         while st.session_state.get("dashboard_streaming", False):
             ret, frame = cap.read()
@@ -370,6 +383,7 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
                 continue
 
             frame_count += 1
+            batch_frame_count += 1
 
             # Calculate FPS
             now = time.time()
@@ -526,12 +540,19 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
             display_rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
             frame_placeholder.image(display_rgb, channels="RGB", use_container_width=True)
 
+            # Yield control back to Streamlit after a batch so UI interactions can be processed
+            if batch_frame_count >= MAX_FRAMES_PER_BATCH:
+                break
+
     except Exception as e:
         st.error(f"Stream error: {e}")
     finally:
         cap.release()
-        st.session_state.pop("dashboard_streaming", None)
-        status_text.markdown("⚫ **Stopped**")
+        # If still streaming, rerun to process next batch (allows Stop button to work)
+        if st.session_state.get("dashboard_streaming", False):
+            st.rerun()
+        else:
+            status_text.markdown("⚫ **Stopped**")
 
 
 # ============================================================
@@ -549,13 +570,23 @@ def page_video_upload():
     )
 
     if uploaded_file is not None:
-        # Save uploaded file
-        file_ext = os.path.splitext(uploaded_file.name)[1]
-        unique_name = f"{uuid.uuid4().hex}{file_ext}"
-        save_path = os.path.join(UPLOADS_DIR, unique_name)
+        # Cache the saved file to avoid re-saving on every Streamlit rerun
+        upload_cache_key = f"upload_cache_{uploaded_file.file_id}"
+        if upload_cache_key not in st.session_state:
+            file_ext = os.path.splitext(uploaded_file.name)[1]
+            unique_name = f"{uuid.uuid4().hex}{file_ext}"
+            save_path = os.path.join(UPLOADS_DIR, unique_name)
 
-        with open(save_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+            with open(save_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+
+            st.session_state[upload_cache_key] = {
+                "save_path": save_path,
+                "unique_name": unique_name
+            }
+        else:
+            save_path = st.session_state[upload_cache_key]["save_path"]
+            unique_name = st.session_state[upload_cache_key]["unique_name"]
 
         st.success(f"✅ Uploaded: **{uploaded_file.name}** ({uploaded_file.size / 1024 / 1024:.1f} MB)")
 
@@ -802,7 +833,7 @@ def page_incident_viewer():
 
     if incidents:
         for incident in incidents:
-            confidence_str = f"{incident['confidence']:.1%}" if incident['confidence'] else "N/A"
+            confidence_str = f"{incident['confidence']:.1%}" if incident['confidence'] is not None else "N/A"
 
             with st.expander(
                 f"🚨 #{incident['id']} | {incident['timestamp']} | "

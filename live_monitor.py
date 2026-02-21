@@ -108,10 +108,12 @@ def draw_detections(frame, detections, tracked_data, poses, events, fps):
 
     # Semi-transparent background for OSD
     overlay_h = 25 * len(overlay_lines) + 15
-    overlay_bg = frame[5:5 + overlay_h, 5:280].copy()
-    cv2.rectangle(frame, (5, 5), (280, 5 + overlay_h), (0, 0, 0), -1)
-    cv2.addWeighted(overlay_bg, 0.3, frame[5:5 + overlay_h, 5:280], 0.7, 0,
-                    frame[5:5 + overlay_h, 5:280])
+    overlay_w = min(275, w - 10)  # Clamp to frame width to avoid crash on small frames
+    if overlay_w > 0 and overlay_h > 0 and h > 5 + overlay_h and w > 5 + overlay_w:
+        overlay_bg = frame[5:5 + overlay_h, 5:5 + overlay_w].copy()
+        cv2.rectangle(frame, (5, 5), (5 + overlay_w, 5 + overlay_h), (0, 0, 0), -1)
+        cv2.addWeighted(overlay_bg, 0.3, frame[5:5 + overlay_h, 5:5 + overlay_w], 0.7, 0,
+                        frame[5:5 + overlay_h, 5:5 + overlay_w])
 
     for i, line in enumerate(overlay_lines):
         cv2.putText(frame, line, (10, 25 + i * 25), cv2.FONT_HERSHEY_SIMPLEX,
@@ -193,7 +195,14 @@ def main():
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     print(f"[LiveMonitor] {MAX_CONSECUTIVE_FAILURES} consecutive read failures. Exiting.")
                     break
-                time.sleep(0.05)
+                # Attempt to reconnect after 30 failures
+                if consecutive_failures % 30 == 0:
+                    print(f"[LiveMonitor] Reconnecting to camera source...")
+                    cap.release()
+                    time.sleep(1)
+                    cap = cv2.VideoCapture(source)
+                else:
+                    time.sleep(0.05)
                 continue
             consecutive_failures = 0
 

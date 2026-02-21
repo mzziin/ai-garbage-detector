@@ -1,3 +1,4 @@
+import math
 import numpy as np
 from ultralytics import YOLO
 from config import (
@@ -16,6 +17,16 @@ class Detector:
         self.pose_model = YOLO(POSE_MODEL)
         print(f"[Detector] Detection model: {DETECTION_MODEL}")
         print(f"[Detector] Pose model: {POSE_MODEL}")
+
+    @staticmethod
+    def _safe_track_id(boxes, i):
+        """Safely extract track ID, guarding against None tensor and NaN values."""
+        if boxes.id is None:
+            return -1
+        val = boxes.id[i].item()
+        if math.isnan(val):
+            return -1
+        return int(val)
 
     def detect(self, frame):
         """
@@ -47,7 +58,7 @@ class Detector:
                     cls_id = int(boxes.cls[i].item())
                     conf = float(boxes.conf[i].item())
                     box = boxes.xyxy[i].cpu().numpy().astype(int).tolist()
-                    track_id = int(boxes.id[i].item()) if boxes.id is not None else -1
+                    track_id = self._safe_track_id(boxes, i)
 
                     entry = {
                         "box": box,  # [x1, y1, x2, y2]
@@ -106,7 +117,7 @@ class Detector:
                     kps = keypoints_data[i]  # shape (17, 3)
                     box = boxes.xyxy[i].cpu().numpy().astype(int).tolist()
                     conf = float(boxes.conf[i].item())
-                    track_id = int(boxes.id[i].item()) if boxes.id is not None else -1
+                    track_id = self._safe_track_id(boxes, i)
 
                     poses.append({
                         "keypoints": kps,

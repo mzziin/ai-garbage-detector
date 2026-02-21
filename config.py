@@ -19,6 +19,8 @@ for d in [DATA_DIR, UPLOADS_DIR, EVIDENCE_DIR]:
 # ============================================================
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # Use the small model on GPU for better accuracy, nano on CPU for speed
+# NOTE: yolov8s.pt and yolov8s-pose.pt are not bundled in the repo;
+# ultralytics will auto-download them on first GPU run.
 DETECTION_MODEL = "yolov8s.pt" if DEVICE == "cuda" else "yolov8n.pt"
 POSE_MODEL = "yolov8s-pose.pt" if DEVICE == "cuda" else "yolov8n-pose.pt"
 
