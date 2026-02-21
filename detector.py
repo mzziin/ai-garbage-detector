@@ -4,7 +4,7 @@ from ultralytics import YOLO
 from config import (
     DEVICE, DETECTION_MODEL,
     DETECTION_CONFIDENCE,
-    PERSON_CLASS_ID, WASTE_CLASS_IDS
+    PERSON_CLASS_ID, WASTE_CLASS_IDS, CAR_CLASS_IDS
 )
 
 
@@ -46,6 +46,7 @@ class Detector:
 
         persons = []
         waste_objects = []
+        cars = []
 
         if results and len(results) > 0:
             result = results[0]
@@ -70,10 +71,13 @@ class Detector:
                         persons.append(entry)
                     elif cls_id in WASTE_CLASS_IDS:
                         waste_objects.append(entry)
+                    elif cls_id in CAR_CLASS_IDS:
+                        cars.append(entry)
 
         return {
             "persons": persons,
             "waste": waste_objects,
+            "cars": cars,
             "raw_results": results
         }
 
@@ -93,6 +97,7 @@ class Detector:
 
         persons = []
         waste_objects = []
+        cars = []
 
         if results and len(results) > 0:
             result = results[0]
@@ -116,9 +121,12 @@ class Detector:
                         persons.append(entry)
                     elif cls_id in WASTE_CLASS_IDS:
                         waste_objects.append(entry)
+                    elif cls_id in CAR_CLASS_IDS:
+                        cars.append(entry)
 
         return {
             "persons": persons,
             "waste": waste_objects,
+            "cars": cars,
             "raw_results": results
         }

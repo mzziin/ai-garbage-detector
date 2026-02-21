@@ -41,9 +41,18 @@ def init_db():
                 snapshot_path TEXT,
                 description TEXT,
                 objects_detected TEXT,
+                incident_type TEXT DEFAULT 'person_dump',
                 FOREIGN KEY (camera_id) REFERENCES cameras(id)
             )
         """)
+        # Migration: add incident_type if table already existed without it
+        try:
+            cursor.execute(
+                "ALTER TABLE incidents ADD COLUMN incident_type TEXT DEFAULT 'person_dump'"
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS video_uploads (
@@ -67,9 +76,17 @@ def init_db():
                 confidence REAL,
                 snapshot_path TEXT,
                 objects_detected TEXT,
+                incident_type TEXT DEFAULT 'person_dump',
                 FOREIGN KEY (upload_id) REFERENCES video_uploads(id)
             )
         """)
+        try:
+            cursor.execute(
+                "ALTER TABLE video_detections ADD COLUMN incident_type TEXT DEFAULT 'person_dump'"
+            )
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
         conn.commit()
     finally:
@@ -129,16 +146,17 @@ def delete_camera(camera_id):
 # Incident CRUD
 # ============================================================
 
-def insert_incident(camera_id, confidence, snapshot_path, description, objects_detected):
-    """Log a new detected incident."""
+def insert_incident(camera_id, confidence, snapshot_path, description, objects_detected,
+                   incident_type="person_dump"):
+    """Log a new detected incident. incident_type: 'person_dump' or 'car_litter'."""
     conn = get_connection()
     try:
         cursor = conn.cursor()
         objects_json = json.dumps(objects_detected) if isinstance(objects_detected, list) else objects_detected
         cursor.execute(
-            "INSERT INTO incidents (camera_id, confidence, snapshot_path, description, objects_detected) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (camera_id, confidence, snapshot_path, description, objects_json)
+            "INSERT INTO incidents (camera_id, confidence, snapshot_path, description, objects_detected, incident_type) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (camera_id, confidence, snapshot_path, description, objects_json, incident_type)
         )
         conn.commit()
         return cursor.lastrowid
@@ -270,17 +288,17 @@ def get_video_upload(upload_id):
 # ============================================================
 
 def insert_video_detection(upload_id, frame_number, timestamp_in_video, confidence,
-                           snapshot_path, objects_detected):
-    """Log a detection found in an uploaded video."""
+                           snapshot_path, objects_detected, incident_type="person_dump"):
+    """Log a detection found in an uploaded video. incident_type: 'person_dump' or 'car_litter'."""
     conn = get_connection()
     try:
         cursor = conn.cursor()
         objects_json = json.dumps(objects_detected) if isinstance(objects_detected, list) else objects_detected
         cursor.execute(
             "INSERT INTO video_detections "
-            "(upload_id, frame_number, timestamp_in_video, confidence, snapshot_path, objects_detected) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (upload_id, frame_number, timestamp_in_video, confidence, snapshot_path, objects_json)
+            "(upload_id, frame_number, timestamp_in_video, confidence, snapshot_path, objects_detected, incident_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (upload_id, frame_number, timestamp_in_video, confidence, snapshot_path, objects_json, incident_type)
         )
         conn.commit()
         return cursor.lastrowid

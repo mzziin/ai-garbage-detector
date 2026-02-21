@@ -10,7 +10,10 @@ import cv2
 import json
 from datetime import datetime
 
-from config import EVIDENCE_DIR, VIDEO_FRAME_SAMPLE_RATE, DEVICE, PROXIMITY_THRESHOLD
+from config import (
+    EVIDENCE_DIR, VIDEO_FRAME_SAMPLE_RATE, DEVICE,
+    PROXIMITY_THRESHOLD, CAR_PROXIMITY_THRESHOLD,
+)
 from detector import Detector
 from database import (
     update_video_upload, insert_video_detection
@@ -71,15 +74,13 @@ def process_video(upload_id, video_path, progress_callback=None):
             # Run detection (without persistent tracking for sampled frames)
             detections = detector.detect_for_video(frame)
 
-            # For video analysis, we use a simplified approach:
-            # Check if person + waste are in proximity in the same frame
+            # For video analysis: person-waste proximity (person_dump) and car-waste (car_litter)
             persons = detections["persons"]
             waste = detections["waste"]
+            cars = detections.get("cars", [])
 
-            detection_made = False
-
+            # Person-dump: person + waste in proximity
             if persons and waste:
-                # Check proximity between each person-waste pair
                 for waste_obj in waste:
                     wx = (waste_obj["box"][0] + waste_obj["box"][2]) // 2
                     wy = (waste_obj["box"][1] + waste_obj["box"][3]) // 2
@@ -91,42 +92,75 @@ def process_video(upload_id, video_path, progress_callback=None):
                         dist = ((wx - px) ** 2 + (wy - py) ** 2) ** 0.5
 
                         if dist <= PROXIMITY_THRESHOLD:
-                            # Calculate confidence — weighted by detection and proximity
                             detection_conf = (waste_obj["confidence"] + person["confidence"]) / 2
-                            # Proximity factor: bonus for person being close (scales with closeness)
                             proximity_factor = max(0, 1.0 - dist / PROXIMITY_THRESHOLD) * 0.3
                             confidence = detection_conf * 0.7 + proximity_factor
 
                             if confidence > 0.3:
-                                # Save snapshot
                                 snapshot_path = _save_video_snapshot(
                                     frame, upload_id, frame_number
                                 )
-
                                 objects_detected = [waste_obj["class_name"]]
-
                                 insert_video_detection(
                                     upload_id=upload_id,
                                     frame_number=frame_number,
                                     timestamp_in_video=round(timestamp_in_video, 2),
                                     confidence=round(confidence, 3),
                                     snapshot_path=snapshot_path,
-                                    objects_detected=objects_detected
+                                    objects_detected=objects_detected,
+                                    incident_type="person_dump"
                                 )
-
                                 incidents_found += 1
                                 all_detections.append({
                                     "frame_number": frame_number,
                                     "timestamp": round(timestamp_in_video, 2),
                                     "confidence": round(confidence, 3),
                                     "objects": objects_detected,
-                                    "snapshot_path": snapshot_path
+                                    "snapshot_path": snapshot_path,
+                                    "incident_type": "person_dump"
                                 })
-                                detection_made = True
-                                break  # One detection per waste object
+                                break
 
-                    if detection_made:
-                        break  # Move to next frame after first detection
+            # Car-litter: vehicle + waste in proximity (same frame)
+            if cars and waste:
+                for waste_obj in waste:
+                    wx = (waste_obj["box"][0] + waste_obj["box"][2]) // 2
+                    wy = (waste_obj["box"][1] + waste_obj["box"][3]) // 2
+
+                    for car in cars:
+                        cx = (car["box"][0] + car["box"][2]) // 2
+                        cy = (car["box"][1] + car["box"][3]) // 2
+                        dist = ((wx - cx) ** 2 + (wy - cy) ** 2) ** 0.5
+
+                        if dist <= CAR_PROXIMITY_THRESHOLD:
+                            conf = (waste_obj["confidence"] + car["confidence"]) / 2
+                            proximity_factor = max(0, 1.0 - dist / CAR_PROXIMITY_THRESHOLD) * 0.2
+                            confidence = conf * 0.8 + proximity_factor
+
+                            if confidence > 0.3:
+                                snapshot_path = _save_video_snapshot(
+                                    frame, upload_id, frame_number
+                                )
+                                objects_detected = [waste_obj["class_name"], car["class_name"]]
+                                insert_video_detection(
+                                    upload_id=upload_id,
+                                    frame_number=frame_number,
+                                    timestamp_in_video=round(timestamp_in_video, 2),
+                                    confidence=round(confidence, 3),
+                                    snapshot_path=snapshot_path,
+                                    objects_detected=objects_detected,
+                                    incident_type="car_litter"
+                                )
+                                incidents_found += 1
+                                all_detections.append({
+                                    "frame_number": frame_number,
+                                    "timestamp": round(timestamp_in_video, 2),
+                                    "confidence": round(confidence, 3),
+                                    "objects": objects_detected,
+                                    "snapshot_path": snapshot_path,
+                                    "incident_type": "car_litter"
+                                })
+                            break  # one car per waste
 
             # Update progress
             update_video_upload(

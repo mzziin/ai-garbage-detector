@@ -4,9 +4,30 @@ AI-Based Illegal Garbage Dumping Detection System — Streamlit Dashboard
 Run with: streamlit run app.py
 """
 
-import streamlit as st
 import os
 import sys
+import logging
+import warnings
+
+# Suppress Streamlit "missing ScriptRunContext" (safe to ignore; Streamlit says so)
+warnings.filterwarnings(
+    "ignore",
+    message=".*missing ScriptRunContext.*",
+    category=UserWarning,
+    module="streamlit",
+)
+
+
+class _ScriptRunContextFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage() or ""
+        return "missing ScriptRunContext" not in msg
+
+
+# Apply to root logger so Streamlit's log messages are filtered
+logging.getLogger().addFilter(_ScriptRunContextFilter())
+
+import streamlit as st
 import json
 import subprocess
 import platform
@@ -41,6 +62,20 @@ init_db()
 # Session state for monitor processes
 if "monitor_processes" not in st.session_state:
     st.session_state.monitor_processes = {}
+
+
+def _safe_incident_display(incident):
+    """Normalize incident dict for display; sqlite3.Row can sometimes return bytes."""
+    out = dict(incident)
+    for key in ("id", "camera_id", "description", "snapshot_path", "objects_detected", "incident_type", "timestamp"):
+        if key in out and out[key] is not None and isinstance(out[key], bytes):
+            out[key] = out[key].decode("utf-8", errors="replace")
+    if out.get("confidence") is not None and isinstance(out["confidence"], bytes):
+        try:
+            out["confidence"] = float(out["confidence"].decode("utf-8"))
+        except (ValueError, TypeError):
+            out["confidence"] = None
+    return out
 
 
 # ============================================================
@@ -92,31 +127,33 @@ def page_dashboard():
 
     if incidents:
         for incident in incidents:
+            inc = _safe_incident_display(incident)
+            itype = inc.get("incident_type") or "person_dump"
+            type_label = "🚗 Car litter" if itype == "car_litter" else "🚶 Person dump"
+            conf_str = f"{inc['confidence']:.1%}" if inc.get("confidence") is not None else "N/A"
             with st.expander(
-                f"🚨 Incident #{incident['id']} — "
-                f"{incident['timestamp']} — "
-                f"Confidence: {incident['confidence']:.1%}" if incident['confidence'] is not None else
-                f"🚨 Incident #{incident['id']} — {incident['timestamp']}"
+                f"🚨 Incident #{inc['id']} — {type_label} — {inc['timestamp']} — Confidence: {conf_str}"
             ):
                 col_img, col_info = st.columns([1, 2])
 
                 with col_img:
-                    if incident["snapshot_path"] and os.path.exists(incident["snapshot_path"]):
-                        img = Image.open(incident["snapshot_path"])
-                        st.image(img, caption="Evidence Snapshot", use_container_width=True)
+                    if inc.get("snapshot_path") and os.path.exists(inc["snapshot_path"]):
+                        img = Image.open(inc["snapshot_path"])
+                        st.image(img, caption="Evidence Snapshot", use_container_width=True, width='stretch')
                     else:
                         st.info("No snapshot available")
 
                 with col_info:
-                    st.markdown(f"**Description:** {incident['description']}")
-                    st.markdown(f"**Camera ID:** {incident['camera_id']}")
-                    st.markdown(f"**Confidence:** {incident['confidence']:.1%}" if incident['confidence'] is not None else "**Confidence:** N/A")
-                    if incident["objects_detected"]:
+                    st.markdown(f"**Type:** {type_label}")
+                    st.markdown(f"**Description:** {inc.get('description', '')}")
+                    st.markdown(f"**Camera ID:** {inc.get('camera_id')}")
+                    st.markdown(f"**Confidence:** {conf_str}")
+                    if inc.get("objects_detected"):
                         try:
-                            objects = json.loads(incident["objects_detected"])
+                            objects = json.loads(inc["objects_detected"])
                             st.markdown(f"**Objects Detected:** {', '.join(objects)}")
                         except (json.JSONDecodeError, TypeError):
-                            st.markdown(f"**Objects Detected:** {incident['objects_detected']}")
+                            st.markdown(f"**Objects Detected:** {inc['objects_detected']}")
     else:
         st.info("No incidents detected yet. Start a live monitor or upload a video to begin detection.")
 
@@ -125,7 +162,8 @@ def page_dashboard():
         st.markdown("---")
         st.subheader("Incident Trend")
 
-        df = pd.DataFrame(incidents)
+        incidents_safe = [_safe_incident_display(i) for i in incidents]
+        df = pd.DataFrame(incidents_safe)
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df["date"] = df["timestamp"].dt.date
 
@@ -134,7 +172,7 @@ def page_dashboard():
                      title="Incidents Per Day",
                      labels={"date": "Date", "incidents": "Number of Incidents"})
         fig.update_layout(xaxis_title="Date", yaxis_title="Incidents")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, width='stretch')
 
 
 # ============================================================
@@ -184,7 +222,7 @@ def _render_opencv_monitor(selected_camera_id, selected_camera):
     col1, col2 = st.columns(2)
 
     with col1:
-        if st.button("🟢 Start Live Monitor", type="primary", use_container_width=True):
+        if st.button("🟢 Start Live Monitor", type="primary", use_container_width=True, width='stretch'):
             source = get_camera_source(selected_camera_id)
             if source is None:
                 st.error("Could not determine camera source.")
@@ -220,7 +258,7 @@ def _render_opencv_monitor(selected_camera_id, selected_camera):
                 st.error(f"Failed to launch monitor: {e}")
 
     with col2:
-        if st.button("🔴 Stop All Monitors", use_container_width=True):
+        if st.button("🔴 Stop All Monitors", use_container_width=True, width='stretch'):
             stopped = 0
             for cam_id, info in list(st.session_state.monitor_processes.items()):
                 proc = info["process"]
@@ -270,9 +308,9 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
 
     col1, col2 = st.columns(2)
     with col1:
-        start_stream = st.button("🟢 Start Live Stream", type="primary", use_container_width=True)
+        start_stream = st.button("🟢 Start Live Stream", type="primary", use_container_width=True, width='stretch')
     with col2:
-        stop_stream = st.button("🔴 Stop Stream", use_container_width=True)
+        stop_stream = st.button("🔴 Stop Stream", use_container_width=True, width='stretch')
 
     if stop_stream:
         st.session_state.pop("dashboard_streaming", None)
@@ -351,6 +389,7 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
     frame_count = 0
     last_persons = []
     last_waste = []
+    last_cars = []
     last_alert = False
     alert_message = ""
     scale_x, scale_y = 1.0, 1.0
@@ -399,9 +438,10 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
                 tracked_data = tracker.update(detections)
                 last_persons = detections["persons"]
                 last_waste = detections["waste"]
+                last_cars = detections.get("cars", [])
 
                 # Scale boxes back to original resolution
-                for det in last_persons + last_waste:
+                for det in last_persons + last_waste + last_cars:
                     det["box"] = [
                         int(det["box"][0] * scale_x),
                         int(det["box"][1] * scale_y),
@@ -413,35 +453,45 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
                 confirmed_events = analyzer.analyze(tracked_data)
                 
                 last_alert = len(confirmed_events) > 0
+                from dump_analyzer import INCIDENT_TYPE_CAR_LITTER
+                car_litter_alert = any(
+                    getattr(e, "incident_type", None) == INCIDENT_TYPE_CAR_LITTER
+                    for e in confirmed_events
+                )
                 if last_alert:
-                    alert_message = "!! ILLEGAL DUMPING DETECTED !!"
+                    alert_message = "!! CAR LITTER DETECTED !!" if car_litter_alert else "!! ILLEGAL DUMPING DETECTED !!"
                     
                     # Log to database
                     from database import insert_incident
                     for event in confirmed_events:
-                        # Save evidence snapshot
+                        incident_type = getattr(event, "incident_type", "person_dump")
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         snapshot_name = f"dash_{selected_camera_id}_{timestamp}.jpg"
                         snapshot_path = os.path.join(EVIDENCE_DIR, snapshot_name)
                         cv2.imwrite(snapshot_path, frame)
                         
-                        # Get object names
                         objects = []
                         for w in last_waste:
                             if w["track_id"] == event.waste_track_id:
                                 objects.append(w["class_name"])
                                 break
                         
+                        if incident_type == INCIDENT_TYPE_CAR_LITTER:
+                            desc = "Automated dashboard: Garbage thrown from vehicle detected."
+                        else:
+                            desc = f"Automated dashboard detection: Person #{event.person_track_id} dumped waste."
+                        
                         insert_incident(
                             camera_id=selected_camera_id,
                             confidence=event.final_confidence(),
                             snapshot_path=snapshot_path,
-                            description=f"Automated dashboard detection: Person #{event.person_track_id} dumped waste.",
-                            objects_detected=objects
+                            description=desc,
+                            objects_detected=objects,
+                            incident_type=incident_type
                         )
 
                 detection_text.markdown(
-                    f"**Persons:** {len(last_persons)} | **Waste:** {len(last_waste)}"
+                    f"**Persons:** {len(last_persons)} | **Waste:** {len(last_waste)} | **Vehicles:** {len(last_cars)}"
                 )
 
             # Draw cached detections on current frame
@@ -459,6 +509,12 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
                 cv2.putText(display, f"{det['class_name']} ({det['confidence']:.2f})",
                             (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
+            for det in last_cars:
+                x1, y1, x2, y2 = det["box"]
+                cv2.rectangle(display, (x1, y1), (x2, y2), (255, 255, 0), 2)
+                cv2.putText(display, det["class_name"], (x1, y1 - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+
             # Alert overlay
             if last_alert:
                 h, ww = display.shape[:2]
@@ -474,7 +530,7 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
 
             # Convert BGR to RGB for Streamlit
             display_rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
-            frame_placeholder.image(display_rgb, channels="RGB", use_container_width=True)
+            frame_placeholder.image(display_rgb, channels="RGB", use_container_width=True, width='stretch')
 
             # Yield control back to Streamlit after a batch so UI interactions can be processed
             if batch_frame_count >= MAX_FRAMES_PER_BATCH:
@@ -571,14 +627,16 @@ def page_video_upload():
             if results["detections"]:
                 st.markdown("### Detected Incidents")
                 for det in results["detections"]:
+                    dtype = det.get("incident_type", "person_dump")
+                    type_label = "Car litter" if dtype == "car_litter" else "Person dump"
                     with st.expander(
-                        f"Frame {det['frame_number']} — "
+                        f"Frame {det['frame_number']} — {type_label} — "
                         f"Time: {det['timestamp']:.1f}s — "
                         f"Confidence: {det['confidence']:.1%}"
                     ):
                         if det["snapshot_path"] and os.path.exists(det["snapshot_path"]):
                             img = Image.open(det["snapshot_path"])
-                            st.image(img, caption=f"Frame {det['frame_number']}", use_container_width=True)
+                            st.image(img, caption=f"Frame {det['frame_number']}", use_container_width=True, width='stretch')
                         st.markdown(f"**Objects:** {', '.join(det['objects'])}")
                         st.markdown(f"**Confidence:** {det['confidence']:.1%}")
             else:
@@ -616,12 +674,15 @@ def page_video_upload():
                     if detections:
                         st.markdown("**Detections:**")
                         for det in detections:
+                            dtype = det.get("incident_type") or "person_dump"
+                            type_label = "Car litter" if dtype == "car_litter" else "Person dump"
                             col_img, col_info = st.columns([1, 2])
                             with col_img:
                                 if det["snapshot_path"] and os.path.exists(det["snapshot_path"]):
                                     img = Image.open(det["snapshot_path"])
-                                    st.image(img, use_container_width=True)
+                                    st.image(img, use_container_width=True, width='stretch')
                             with col_info:
+                                st.markdown(f"**Type:** {type_label}")
                                 st.markdown(f"Frame: {det['frame_number']}")
                                 st.markdown(f"Time: {det['timestamp_in_video']:.1f}s")
                                 st.markdown(f"Confidence: {det['confidence']:.1%}")
@@ -659,7 +720,7 @@ def page_camera_management():
         col1, col2 = st.columns(2)
         with col1:
             submitted = st.form_submit_button("➕ Add Camera", type="primary",
-                                              use_container_width=True)
+                                              use_container_width=True, width='stretch')
         with col2:
             test_btn = st.form_submit_button("🔍 Test Connection", use_container_width=True)
 
@@ -769,34 +830,38 @@ def page_incident_viewer():
 
     if incidents:
         for incident in incidents:
-            confidence_str = f"{incident['confidence']:.1%}" if incident['confidence'] is not None else "N/A"
+            inc = _safe_incident_display(incident)
+            confidence_str = f"{inc['confidence']:.1%}" if inc.get("confidence") is not None else "N/A"
+            itype = inc.get("incident_type") or "person_dump"
+            type_label = "Car litter" if itype == "car_litter" else "Person dump"
 
             with st.expander(
-                f"🚨 #{incident['id']} | {incident['timestamp']} | "
-                f"Confidence: {confidence_str} | Camera: {incident['camera_id']}"
+                f"🚨 #{inc['id']} | {type_label} | {inc['timestamp']} | "
+                f"Confidence: {confidence_str} | Camera: {inc.get('camera_id')}"
             ):
                 col_img, col_info = st.columns([1, 2])
 
                 with col_img:
-                    if incident["snapshot_path"] and os.path.exists(incident["snapshot_path"]):
-                        img = Image.open(incident["snapshot_path"])
-                        st.image(img, caption="Evidence", use_container_width=True)
+                    if inc.get("snapshot_path") and os.path.exists(inc["snapshot_path"]):
+                        img = Image.open(inc["snapshot_path"])
+                        st.image(img, caption="Evidence", use_container_width=True, width='stretch')
                     else:
                         st.info("No snapshot available")
 
                 with col_info:
-                    st.markdown(f"**Incident ID:** {incident['id']}")
-                    st.markdown(f"**Timestamp:** {incident['timestamp']}")
-                    st.markdown(f"**Camera ID:** {incident['camera_id']}")
+                    st.markdown(f"**Incident ID:** {inc['id']}")
+                    st.markdown(f"**Type:** {type_label}")
+                    st.markdown(f"**Timestamp:** {inc['timestamp']}")
+                    st.markdown(f"**Camera ID:** {inc.get('camera_id')}")
                     st.markdown(f"**Confidence:** {confidence_str}")
-                    st.markdown(f"**Description:** {incident['description']}")
+                    st.markdown(f"**Description:** {inc.get('description', '')}")
 
-                    if incident["objects_detected"]:
+                    if inc.get("objects_detected"):
                         try:
-                            objects = json.loads(incident["objects_detected"])
+                            objects = json.loads(inc["objects_detected"])
                             st.markdown(f"**Objects:** {', '.join(objects)}")
                         except (json.JSONDecodeError, TypeError):
-                            st.markdown(f"**Objects:** {incident['objects_detected']}")
+                            st.markdown(f"**Objects:** {inc['objects_detected']}")
     else:
         st.info("No incidents found for the selected filters.")
 

@@ -5,11 +5,13 @@ Real-time detection of illegal garbage dumping using AI-powered computer vision.
 ## Features
 
 - **Real-time detection** from webcam, mobile phone (IP Webcam), or CCTV/RTSP cameras
-- **Video upload analysis** — upload recorded footage for batch processing
+- **Person dumping** — person near new waste, then leaves; waste stays → incident
+- **Car garbage-throwing** — waste near vehicle (car/bus/truck) for several frames → car-litter incident
+- **Video upload analysis** — upload recorded footage for batch processing (both person-dump and car-litter)
 - **Multi-stage detection pipeline** — object detection, tracking, temporal analysis, proximity check, confidence accumulation, cooldown
 - **Separate camera window** — live feed runs in a native OpenCV window, not in the browser
-- **Streamlit dashboard** — incident management, stats, camera management, video upload
-- **GPU accelerated** — CUDA support for NVIDIA RTX GPUs (auto-falls back to CPU)
+- **Streamlit dashboard** — incident management, stats, camera management, video upload; filter by incident type
+- **GPU accelerated** — CUDA support for NVIDIA RTX GPUs (auto-falls back to CPU); single YOLO run for person, waste, and vehicles
 
 ## Tech Stack
 

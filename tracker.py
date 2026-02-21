@@ -138,12 +138,16 @@ class ObjectTracker:
             else:
                 pre_existing_waste.append(obj)
 
+        # Pass through cars from detector (no tracking); analyzer uses for car-litter
+        cars = detections.get("cars", [])
+
         return {
             "persons": self.persons,
             "waste": self.waste_objects,
             "new_waste": new_waste,
             "pre_existing_waste": pre_existing_waste,
-            "frame_count": self.frame_count
+            "frame_count": self.frame_count,
+            "cars": cars,
         }
 
     def is_waste_persistent(self, waste_obj):

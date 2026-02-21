@@ -6,12 +6,19 @@ from config import (
     PROXIMITY_THRESHOLD, FRAME_ACCUMULATION_THRESHOLD, COOLDOWN_SECONDS,
     WEIGHT_DETECTION, WEIGHT_TEMPORAL, WEIGHT_ACCUMULATION,
     WASTE_PERSISTENCE_FRAMES, DEFAULT_SAFE_ZONES,
-    STATIONARY_THRESHOLD, PERSON_LEFT_FRAMES
+    STATIONARY_THRESHOLD, PERSON_LEFT_FRAMES,
+    CAR_PROXIMITY_THRESHOLD, CAR_LITTER_ACCUMULATION_THRESHOLD,
 )
+
+
+INCIDENT_TYPE_PERSON_DUMP = "person_dump"
+INCIDENT_TYPE_CAR_LITTER = "car_litter"
 
 
 class DumpEvent:
     """Tracks the accumulation of evidence for a potential dump event using a state machine."""
+
+    incident_type = INCIDENT_TYPE_PERSON_DUMP
 
     def __init__(self, waste_track_id, person_track_id, initial_center):
         self.waste_track_id = waste_track_id
@@ -94,6 +101,35 @@ class DumpEvent:
         return round(min(score, 1.0), 3)
 
 
+class CarLitterEvent:
+    """Tracks waste near a vehicle for car garbage-throwing detection."""
+
+    incident_type = INCIDENT_TYPE_CAR_LITTER
+
+    def __init__(self, waste_track_id, car_index, initial_center):
+        self.waste_track_id = waste_track_id
+        self.car_index = car_index
+        self.accumulated_frames = 0
+        self.detection_confidences = []
+        self.initial_center = initial_center
+        self.confirmed = False
+        self.first_detected = time.time()
+
+    def update(self, current_center, detection_conf):
+        self.accumulated_frames += 1
+        self.detection_confidences.append(detection_conf)
+
+    def is_confirmed(self):
+        return self.accumulated_frames >= CAR_LITTER_ACCUMULATION_THRESHOLD
+
+    def final_confidence(self):
+        if not self.detection_confidences:
+            return 0.0
+        avg = sum(self.detection_confidences) / len(self.detection_confidences)
+        acc_factor = min(self.accumulated_frames / CAR_LITTER_ACCUMULATION_THRESHOLD, 1.0)
+        return round(min(avg * 0.7 + acc_factor * 0.3, 1.0), 3)
+
+
 class DumpAnalyzer:
     """
     Core intelligence module that combines detection, tracking, and
@@ -108,6 +144,7 @@ class DumpAnalyzer:
 
     def __init__(self, safe_zones=None):
         self.active_events = {}  # key: (waste_track_id, person_track_id) -> DumpEvent
+        self.car_litter_events = {}  # key: waste_track_id -> CarLitterEvent
         self.cooldown_log = {}   # key: region_key -> last_incident_time
         self.safe_zones = safe_zones or DEFAULT_SAFE_ZONES
 
@@ -195,6 +232,37 @@ class DumpAnalyzer:
             # or it was picked up. We don't trigger if it disappeared.
             del self.active_events[k]
 
+        # ---- Car-litter: waste near vehicle ----
+        cars = tracked_data.get("cars", [])
+        for waste_obj in new_waste:
+            if self._is_in_safe_zone(waste_obj.box):
+                continue
+            waste_center = waste_obj.center()
+            for car_idx, car in enumerate(cars):
+                car_box = car["box"]
+                car_center = ((car_box[0] + car_box[2]) // 2, (car_box[1] + car_box[3]) // 2)
+                dist = self._distance(waste_center, car_center)
+                if dist <= CAR_PROXIMITY_THRESHOLD:
+                    event_key = waste_obj.track_id
+                    if event_key not in self.car_litter_events:
+                        self.car_litter_events[event_key] = CarLitterEvent(
+                            waste_obj.track_id, car_idx, waste_center
+                        )
+                    ev = self.car_litter_events[event_key]
+                    ev.update(waste_obj.center(), waste_obj.confidence)
+                    if ev.is_confirmed() and not ev.confirmed:
+                        region_key = self._region_key(waste_obj.box)
+                        if not self._is_in_cooldown(region_key):
+                            ev.confirmed = True
+                            self.cooldown_log[region_key] = time.time()
+                            confirmed_events.append(ev)
+                    break  # one car per waste
+
+        # Clean up car_litter_events for waste no longer detected
+        for wid in list(self.car_litter_events.keys()):
+            if wid not in active_waste_ids:
+                del self.car_litter_events[wid]
+
         # Clean up stale/old events
         self._cleanup_stale_events()
 
@@ -247,6 +315,13 @@ class DumpAnalyzer:
                 keys_to_remove.append(key)
         for key in keys_to_remove:
             del self.active_events[key]
+        # Stale car-litter events
+        keys_to_remove = []
+        for key, event in self.car_litter_events.items():
+            if event.confirmed or (now - event.first_detected > max_age_seconds):
+                keys_to_remove.append(key)
+        for key in keys_to_remove:
+            del self.car_litter_events[key]
 
     @staticmethod
     def _distance(p1, p2):
@@ -256,4 +331,5 @@ class DumpAnalyzer:
     def reset(self):
         """Reset all analyzer state."""
         self.active_events.clear()
+        self.car_litter_events.clear()
         self.cooldown_log.clear()

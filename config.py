@@ -36,6 +36,13 @@ DETECTION_CONFIDENCE = 0.4
 PERSON_CLASS_ID = 0
 WASTE_CLASS_IDS = [39, 41, 26, 24, 25, 28]
 
+# COCO class IDs for vehicles (car=2, bus=5, truck=7) — for car garbage-throwing detection
+CAR_CLASS_IDS = [2, 5, 7]
+# Maximum pixel distance between waste and vehicle to consider "car litter"
+CAR_PROXIMITY_THRESHOLD = 250
+# Frames waste must be near a car to confirm car-litter event
+CAR_LITTER_ACCUMULATION_THRESHOLD = 4
+
 # ============================================================
 # Dump Analyzer Settings
 # ============================================================

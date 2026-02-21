@@ -39,6 +39,14 @@ def draw_detections(frame, detections, tracked_data, events, fps):
     """Draw all detection overlays on the frame."""
     h, w = frame.shape[:2]
 
+    # Draw vehicle bounding boxes (cyan) for car-litter context
+    for det in detections.get("cars", []):
+        x1, y1, x2, y2 = det["box"]
+        name = det["class_name"]
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
+        cv2.putText(frame, name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, (255, 255, 0), 2)
+
     # Draw person bounding boxes (green)
     for det in detections["persons"]:
         x1, y1, x2, y2 = det["box"]
@@ -66,10 +74,13 @@ def draw_detections(frame, detections, tracked_data, events, fps):
         cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, color, 2)
 
-    # Flash red border if dump event detected
+    # Flash red border if dump or car-litter event detected
     if events:
         cv2.rectangle(frame, (0, 0), (w - 1, h - 1), (0, 0, 255), 8)
-        cv2.putText(frame, "!! ILLEGAL DUMPING DETECTED !!", (w // 2 - 250, 50),
+        from dump_analyzer import INCIDENT_TYPE_CAR_LITTER
+        car_litter = any(getattr(e, "incident_type", None) == INCIDENT_TYPE_CAR_LITTER for e in events)
+        msg = "!! CAR LITTER DETECTED !!" if car_litter else "!! ILLEGAL DUMPING DETECTED !!"
+        cv2.putText(frame, msg, (w // 2 - 220, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
 
     # OSD overlay — top-left info panel
@@ -77,7 +88,8 @@ def draw_detections(frame, detections, tracked_data, events, fps):
         f"FPS: {fps:.1f}",
         f"Device: {DEVICE.upper()}",
         f"Persons: {len(detections['persons'])}",
-        f"Waste Objects: {len(detections['waste'])}",
+        f"Waste: {len(detections['waste'])}",
+        f"Vehicles: {len(detections.get('cars', []))}",
         f"New Waste: {len(tracked_data.get('new_waste', []))}",
         f"Tracks: {len(tracked_data.get('persons', {})) + len(tracked_data.get('waste', {}))}",
     ]
@@ -196,13 +208,13 @@ def main():
             # Stage 3: Analyze for dump events
             confirmed_events = analyzer.analyze(tracked_data)
 
-            # Log confirmed incidents
+            # Log confirmed incidents (person_dump or car_litter)
             for event in confirmed_events:
                 incident_count += 1
                 snapshot_path = save_snapshot(frame, camera_id)
                 confidence = event.final_confidence()
+                incident_type = getattr(event, "incident_type", "person_dump")
 
-                # Build description
                 objects = []
                 waste_tid = event.waste_track_id
                 for det in detections["waste"]:
@@ -210,12 +222,19 @@ def main():
                         objects.append(det["class_name"])
                         break
 
-                description = (
-                    f"Illegal dumping detected. "
-                    f"Person #{event.person_track_id} dropped waste near "
-                    f"tracked object #{waste_tid}. "
-                    f"Confidence: {confidence:.1%}"
-                )
+                if incident_type == "car_litter":
+                    description = (
+                        f"Garbage thrown from vehicle detected. "
+                        f"Waste (track #{waste_tid}) near vehicle. "
+                        f"Confidence: {confidence:.1%}"
+                    )
+                else:
+                    description = (
+                        f"Illegal dumping detected. "
+                        f"Person #{event.person_track_id} dropped waste near "
+                        f"tracked object #{waste_tid}. "
+                        f"Confidence: {confidence:.1%}"
+                    )
 
                 if camera_id is not None:
                     insert_incident(
@@ -223,12 +242,13 @@ def main():
                         confidence=confidence,
                         snapshot_path=snapshot_path,
                         description=description,
-                        objects_detected=objects
+                        objects_detected=objects,
+                        incident_type=incident_type
                     )
-                    print(f"[LiveMonitor] INCIDENT #{incident_count} logged! "
+                    print(f"[LiveMonitor] INCIDENT #{incident_count} ({incident_type}) logged! "
                           f"Confidence: {confidence:.1%}, Snapshot: {snapshot_path}")
                 else:
-                    print(f"[LiveMonitor] INCIDENT detected (no camera_id to log). "
+                    print(f"[LiveMonitor] INCIDENT ({incident_type}) detected (no camera_id to log). "
                           f"Confidence: {confidence:.1%}")
 
             # Draw everything on frame
