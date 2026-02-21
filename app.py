@@ -338,9 +338,26 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
     last_waste = []
     last_poses = []
     last_alert = False
-    scale_x, scale_y = 1.0, 1.0  # Scale factors to map detections back to original
+    alert_message = ""
+    scale_x, scale_y = 1.0, 1.0
 
     from config import PROXIMITY_THRESHOLD
+
+    # ---- Dump detection state machine ----
+    # Tracks waste regions across frames to detect:
+    #   person near waste → person leaves → waste stays = DUMPING
+    # Holding a bottle won't trigger because the person never leaves.
+    waste_tracker = {}          # key: (grid_x, grid_y) -> state dict
+    GRID_SIZE = 80              # Pixel grid for matching waste across frames
+    FRAMES_PERSON_NEAR = 3     # Min inference frames person must be near waste
+    FRAMES_AFTER_LEFT = 5      # Min inference frames waste must persist after person left
+    COOLDOWN_FRAMES = 30       # Ignore same region after confirming an incident
+    cooldown_regions = {}       # key: (grid_x, grid_y) -> remaining cooldown frames
+
+    def _waste_grid(box):
+        cx = (box[0] + box[2]) // 2
+        cy = (box[1] + box[3]) // 2
+        return (cx // GRID_SIZE, cy // GRID_SIZE)
 
     try:
         while st.session_state.get("dashboard_streaming", False):
@@ -391,21 +408,73 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
                 else:
                     last_poses = []
 
-                # Proximity check
+                # ---- Dump state machine update ----
+                # Tick down cooldowns
+                for region in list(cooldown_regions):
+                    cooldown_regions[region] -= 1
+                    if cooldown_regions[region] <= 0:
+                        del cooldown_regions[region]
+
+                active_waste_grids = set()
                 last_alert = False
-                if last_persons and last_waste:
-                    for w in last_waste:
-                        wx = (w["box"][0] + w["box"][2]) // 2
-                        wy = (w["box"][1] + w["box"][3]) // 2
-                        for p in last_persons:
-                            px = (p["box"][0] + p["box"][2]) // 2
-                            py = (p["box"][1] + p["box"][3]) // 2
-                            dist = ((wx - px)**2 + (wy - py)**2) ** 0.5
-                            if dist <= PROXIMITY_THRESHOLD:
-                                last_alert = True
-                                break
-                        if last_alert:
+                alert_message = ""
+
+                for w in last_waste:
+                    grid = _waste_grid(w["box"])
+                    active_waste_grids.add(grid)
+
+                    if grid in cooldown_regions:
+                        continue
+
+                    # Check if any person is near this waste
+                    wx = (w["box"][0] + w["box"][2]) // 2
+                    wy = (w["box"][1] + w["box"][3]) // 2
+                    person_nearby = False
+                    for p in last_persons:
+                        px = (p["box"][0] + p["box"][2]) // 2
+                        py = (p["box"][1] + p["box"][3]) // 2
+                        dist = ((wx - px)**2 + (wy - py)**2) ** 0.5
+                        if dist <= PROXIMITY_THRESHOLD:
+                            person_nearby = True
                             break
+
+                    # Update state for this waste region
+                    if grid not in waste_tracker:
+                        waste_tracker[grid] = {
+                            "person_near_count": 0,
+                            "person_was_near": False,
+                            "person_left": False,
+                            "frames_without_person": 0,
+                            "confirmed": False,
+                        }
+
+                    state = waste_tracker[grid]
+
+                    if person_nearby:
+                        state["person_near_count"] += 1
+                        state["frames_without_person"] = 0
+                        state["person_left"] = False
+                        if state["person_near_count"] >= FRAMES_PERSON_NEAR:
+                            state["person_was_near"] = True
+                    else:
+                        if state["person_was_near"]:
+                            state["person_left"] = True
+                            state["frames_without_person"] += 1
+
+                    # Confirm: person was near -> left -> waste still here
+                    if (state["person_was_near"] and
+                            state["person_left"] and
+                            state["frames_without_person"] >= FRAMES_AFTER_LEFT and
+                            not state["confirmed"]):
+                        state["confirmed"] = True
+                        last_alert = True
+                        alert_message = "!! ILLEGAL DUMPING DETECTED !!"
+                        cooldown_regions[grid] = COOLDOWN_FRAMES
+
+                # Clean up stale waste trackers
+                for grid in list(waste_tracker):
+                    if grid not in active_waste_grids:
+                        del waste_tracker[grid]
 
                 detection_text.markdown(
                     f"**Persons:** {len(last_persons)} | **Waste:** {len(last_waste)}"
@@ -444,8 +513,8 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
             if last_alert:
                 h, ww = display.shape[:2]
                 cv2.rectangle(display, (0, 0), (ww - 1, h - 1), (0, 0, 255), 6)
-                cv2.putText(display, "!! POTENTIAL DUMPING !!",
-                            (ww // 2 - 200, 40),
+                cv2.putText(display, alert_message,
+                            (ww // 2 - 250, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
 
             # OSD
