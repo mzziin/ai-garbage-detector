@@ -142,10 +142,6 @@ def page_dashboard():
 # ============================================================
 def page_live_monitor():
     st.title("📹 Live Monitor")
-    st.markdown(
-        "Launch a **separate OpenCV window** for real-time garbage dump detection. "
-        "The camera feed will open in a new window outside the browser."
-    )
 
     cameras = list_cameras()
 
@@ -159,9 +155,32 @@ def page_live_monitor():
     selected_camera_id = camera_options[selected_label]
     selected_camera = get_camera(selected_camera_id)
 
+    # Choose mode based on camera type
+    is_webcam = selected_camera["source_type"] == "webcam"
+
+    if is_webcam:
+        st.info(
+            "**Webcam detected** — The live feed will open in a **separate OpenCV window** "
+            "(outside the browser). Press **Q** in that window to stop."
+        )
+    else:
+        st.info(
+            "**IP / Mobile camera detected** — The live feed will stream "
+            "**directly in the dashboard** below with real-time detection overlays."
+        )
+
     st.markdown("---")
 
-    # Monitor controls
+    # ---- Mode A: OpenCV window (webcam) ----
+    if is_webcam:
+        _render_opencv_monitor(selected_camera_id, selected_camera)
+    # ---- Mode B: In-dashboard stream (IP / mobile / RTSP) ----
+    else:
+        _render_dashboard_stream(selected_camera_id, selected_camera)
+
+
+def _render_opencv_monitor(selected_camera_id, selected_camera):
+    """Launch the live_monitor.py subprocess for webcam feeds."""
     col1, col2 = st.columns(2)
 
     with col1:
@@ -171,7 +190,6 @@ def page_live_monitor():
                 st.error("Could not determine camera source.")
                 return
 
-            # Launch live_monitor.py as a subprocess
             cmd = [
                 sys.executable, "live_monitor.py",
                 "--source", str(source),
@@ -238,17 +256,170 @@ def page_live_monitor():
     if not active:
         st.info("No active monitors. Select a camera and click Start.")
 
-    # Camera info
-    st.markdown("---")
-    st.subheader("Selected Camera Info")
-    if selected_camera:
+
+def _render_dashboard_stream(selected_camera_id, selected_camera):
+    """Stream IP/mobile camera feed directly in the Streamlit dashboard."""
+    import cv2
+    import numpy as np
+
+    col1, col2 = st.columns(2)
+    with col1:
+        start_stream = st.button("🟢 Start Live Stream", type="primary", use_container_width=True)
+    with col2:
+        stop_stream = st.button("🔴 Stop Stream", use_container_width=True)
+
+    if stop_stream:
+        st.session_state.pop("dashboard_streaming", None)
+        st.info("Stream stopped.")
+        return
+
+    if start_stream:
+        st.session_state["dashboard_streaming"] = True
+
+    if not st.session_state.get("dashboard_streaming", False):
+        st.markdown("---")
+        st.info("Click **Start Live Stream** to begin viewing the camera feed with detection.")
+        st.subheader("Camera Info")
         st.json({
             "ID": selected_camera["id"],
             "Name": selected_camera["name"],
             "Type": selected_camera["source_type"],
-            "Source": selected_camera.get("source_url") or f"Device {selected_camera.get('device_index', 0)}",
-            "Created": selected_camera["created_at"]
+            "Source": selected_camera.get("source_url") or "N/A",
         })
+        return
+
+    # --- Streaming active ---
+    st.markdown("---")
+
+    source = get_camera_source(selected_camera_id)
+    if source is None:
+        st.error("Could not determine camera source.")
+        return
+
+    # Status indicators
+    status_col1, status_col2, status_col3 = st.columns(3)
+    status_text = status_col1.empty()
+    fps_text = status_col2.empty()
+    detection_text = status_col3.empty()
+
+    status_text.markdown("🟡 **Connecting...**")
+
+    # Frame display area
+    frame_placeholder = st.empty()
+
+    # Load models (cached in session state to avoid reloading on every rerun)
+    if "detector_instance" not in st.session_state:
+        with st.spinner("Loading AI models (first time only)..."):
+            from detector import Detector
+            st.session_state["detector_instance"] = Detector()
+
+    detector = st.session_state["detector_instance"]
+
+    cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        st.error(f"❌ Could not connect to camera: {source}")
+        st.session_state.pop("dashboard_streaming", None)
+        return
+
+    # Warm-up
+    for _ in range(5):
+        cap.read()
+
+    status_text.markdown("🟢 **Live**")
+    prev_time = time.time()
+
+    try:
+        while st.session_state.get("dashboard_streaming", False):
+            ret, frame = cap.read()
+            if not ret:
+                status_text.markdown("🟡 **Reconnecting...**")
+                cap.release()
+                time.sleep(1)
+                cap = cv2.VideoCapture(source)
+                continue
+
+            # Calculate FPS
+            now = time.time()
+            fps = 1.0 / max(now - prev_time, 0.001)
+            prev_time = now
+            fps_text.markdown(f"**FPS:** {fps:.1f}")
+
+            # Run detection
+            detections = detector.detect_for_video(frame)
+            poses = detector.detect_pose_for_video(frame)
+
+            persons = detections["persons"]
+            waste = detections["waste"]
+
+            detection_text.markdown(
+                f"**Persons:** {len(persons)} | **Waste:** {len(waste)}"
+            )
+
+            # Draw detections on frame
+            display = frame.copy()
+
+            for det in persons:
+                x1, y1, x2, y2 = det["box"]
+                cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(display, f"Person ({det['confidence']:.2f})",
+                            (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+            for det in waste:
+                x1, y1, x2, y2 = det["box"]
+                cv2.rectangle(display, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                cv2.putText(display, f"{det['class_name']} ({det['confidence']:.2f})",
+                            (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+            # Draw pose skeletons
+            skeleton = [
+                (5, 7), (7, 9), (6, 8), (8, 10), (5, 6),
+                (5, 11), (6, 12), (11, 12),
+                (11, 13), (13, 15), (12, 14), (14, 16)
+            ]
+            for pose in poses:
+                kps = pose["keypoints"]
+                for i, j in skeleton:
+                    if kps[i][2] > 0.3 and kps[j][2] > 0.3:
+                        pt1 = (int(kps[i][0]), int(kps[i][1]))
+                        pt2 = (int(kps[j][0]), int(kps[j][1]))
+                        cv2.line(display, pt1, pt2, (255, 165, 0), 2)
+
+            # Check for proximity-based dump detection
+            if persons and waste:
+                from config import PROXIMITY_THRESHOLD
+                alert_shown = False
+                for w in waste:
+                    if alert_shown:
+                        break
+                    wx = (w["box"][0] + w["box"][2]) // 2
+                    wy = (w["box"][1] + w["box"][3]) // 2
+                    for p in persons:
+                        px = (p["box"][0] + p["box"][2]) // 2
+                        py = (p["box"][1] + p["box"][3]) // 2
+                        dist = ((wx - px)**2 + (wy - py)**2) ** 0.5
+                        if dist <= PROXIMITY_THRESHOLD:
+                            h, ww = display.shape[:2]
+                            cv2.rectangle(display, (0, 0), (ww - 1, h - 1), (0, 0, 255), 6)
+                            cv2.putText(display, "!! POTENTIAL DUMPING !!",
+                                        (ww // 2 - 200, 40),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+                            alert_shown = True
+                            break
+
+            # OSD
+            cv2.putText(display, f"FPS: {fps:.1f} | Device: {DEVICE.upper()}",
+                        (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            # Convert BGR to RGB for Streamlit
+            display_rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
+            frame_placeholder.image(display_rgb, channels="RGB", use_container_width=True)
+
+    except Exception as e:
+        st.error(f"Stream error: {e}")
+    finally:
+        cap.release()
+        st.session_state.pop("dashboard_streaming", None)
+        status_text.markdown("⚫ **Stopped**")
 
 
 # ============================================================
