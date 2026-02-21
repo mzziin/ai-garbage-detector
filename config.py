@@ -1,5 +1,7 @@
 import os
 import torch
+# NOTE: Pose estimation has been removed — detection relies on
+# person + waste proximity and temporal analysis only.
 
 # ============================================================
 # Paths
@@ -19,19 +21,15 @@ for d in [DATA_DIR, UPLOADS_DIR, EVIDENCE_DIR]:
 # ============================================================
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # Use the small model on GPU for better accuracy, nano on CPU for speed
-# NOTE: yolov8s.pt and yolov8s-pose.pt are not bundled in the repo;
-# ultralytics will auto-download them on first GPU run.
+# NOTE: yolov8s.pt is not bundled in the repo;
+# ultralytics will auto-download it on first GPU run.
 DETECTION_MODEL = "yolov8s.pt" if DEVICE == "cuda" else "yolov8n.pt"
-POSE_MODEL = "yolov8s-pose.pt" if DEVICE == "cuda" else "yolov8n-pose.pt"
 
 # ============================================================
 # Detection Settings
 # ============================================================
 # Minimum confidence for YOLOv8 object detection
 DETECTION_CONFIDENCE = 0.4
-
-# Minimum confidence for pose estimation
-POSE_CONFIDENCE = 0.5
 
 # COCO class IDs considered as waste-candidate objects
 # person=0, bottle=39, cup=41, handbag=26, backpack=24, umbrella=25, suitcase=28
@@ -53,21 +51,9 @@ COOLDOWN_SECONDS = 30
 # ============================================================
 # Confidence Score Weights (must sum to 1.0)
 # ============================================================
-WEIGHT_DETECTION = 0.30
-WEIGHT_POSE = 0.25
-WEIGHT_TEMPORAL = 0.25
-WEIGHT_ACCUMULATION = 0.20
-
-# ============================================================
-# Pose Analysis Thresholds
-# ============================================================
-# Arm angle threshold (degrees) for detecting throwing motion
-ARM_ANGLE_THRESHOLD = 45
-
-# Minimum vertical displacement of wrist keypoints between frames
-# to detect a throwing/dropping action (in pixels)
-WRIST_DISPLACEMENT_THRESHOLD = 30
-
+WEIGHT_DETECTION = 0.40
+WEIGHT_TEMPORAL = 0.35
+WEIGHT_ACCUMULATION = 0.25
 # ============================================================
 # Temporal Analysis
 # ============================================================

@@ -18,14 +18,12 @@ health, quality of life, and urban development. Although surveillance cameras ar
 deployed in many locations, they are mostly underutilized and still depend on manual
 observation. Automating this process using AI can make monitoring more efficient, reduce
 human workload, and support smart city and cleanliness initiatives.
-**Proposed Solution Approach**
 We propose an AI-based computer vision system that detects illegal garbage dumping from
 live or recorded camera feeds. Instead of treating dumping as a single action, the system
 uses a multi-stage approach. It detects human presence, identifies common waste objects
-such as plastic bags and bottles, and analyzes motion patterns like throwing or dropping
-actions. When these occur together and waste appears in a non-designated area without a
-nearby dustbin, the event is classified as illegal dumping. This method improves accuracy
-and reduces false detections.
+such as plastic bags and bottles, and analyzes the temporal persistence of these objects.
+When waste appears in a non-designated area and persists after a nearby person has moved away,
+the event is classified as illegal dumping. This method improves accuracy and reduces false detections.
 **Technologies to Be Used:**
 The system will be developed using Python, OpenCV, and deep learning frameworks such
 as TensorFlow or PyTorch for object and activity detection. A simple web-based dashboard

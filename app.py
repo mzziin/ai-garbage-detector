@@ -18,7 +18,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 
-from config import DEVICE, DETECTION_MODEL, POSE_MODEL, UPLOADS_DIR, EVIDENCE_DIR
+from config import DEVICE, DETECTION_MODEL, UPLOADS_DIR, EVIDENCE_DIR
 from database import (
     init_db, get_cameras, get_camera, get_incident_count, get_incidents,
     get_incident, get_video_uploads, get_video_upload, get_video_detections
@@ -57,8 +57,7 @@ page = st.sidebar.radio(
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Device:** `{DEVICE.upper()}`")
-st.sidebar.markdown(f"**Detection Model:** `{DETECTION_MODEL}`")
-st.sidebar.markdown(f"**Pose Model:** `{POSE_MODEL}`")
+st.sidebar.markdown(f"**Model:** `{DETECTION_MODEL}`")
 
 
 # ============================================================
@@ -338,12 +337,10 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
     # Performance settings
     INFER_EVERY_N = 3          # Run AI every Nth frame; show raw feed in between
     INFER_WIDTH = 640          # Resize frame to this width before inference
-    USE_POSE = (DEVICE == "cuda")  # Pose estimation only on GPU (too slow on CPU)
 
     frame_count = 0
     last_persons = []
     last_waste = []
-    last_poses = []
     last_alert = False
     alert_message = ""
     scale_x, scale_y = 1.0, 1.0
@@ -413,14 +410,6 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
                         int(det["box"][2] * scale_x),
                         int(det["box"][3] * scale_y),
                     ]
-
-                if USE_POSE:
-                    last_poses = detector.detect_pose_for_video(small)
-                    for pose in last_poses:
-                        pose["keypoints"][:, 0] *= scale_x
-                        pose["keypoints"][:, 1] *= scale_y
-                else:
-                    last_poses = []
 
                 # ---- Dump state machine update ----
                 # Tick down cooldowns
@@ -508,20 +497,6 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
                 cv2.rectangle(display, (x1, y1), (x2, y2), (0, 0, 255), 2)
                 cv2.putText(display, f"{det['class_name']} ({det['confidence']:.2f})",
                             (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-
-            # Draw pose skeletons
-            skeleton = [
-                (5, 7), (7, 9), (6, 8), (8, 10), (5, 6),
-                (5, 11), (6, 12), (11, 12),
-                (11, 13), (13, 15), (12, 14), (14, 16)
-            ]
-            for pose in last_poses:
-                kps = pose["keypoints"]
-                for i, j in skeleton:
-                    if kps[i][2] > 0.3 and kps[j][2] > 0.3:
-                        pt1 = (int(kps[i][0]), int(kps[i][1]))
-                        pt2 = (int(kps[j][0]), int(kps[j][1]))
-                        cv2.line(display, pt1, pt2, (255, 165, 0), 2)
 
             # Alert overlay
             if last_alert:

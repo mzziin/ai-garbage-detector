@@ -35,7 +35,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def draw_detections(frame, detections, tracked_data, poses, events, fps):
+def draw_detections(frame, detections, tracked_data, events, fps):
     """Draw all detection overlays on the frame."""
     h, w = frame.shape[:2]
 
@@ -65,30 +65,6 @@ def draw_detections(frame, detections, tracked_data, poses, events, fps):
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, color, 2)
-
-    # Draw pose skeletons
-    skeleton_connections = [
-        (5, 7), (7, 9),    # left arm
-        (6, 8), (8, 10),   # right arm
-        (5, 6),            # shoulders
-        (5, 11), (6, 12),  # torso
-        (11, 12),          # hips
-        (11, 13), (13, 15), # left leg
-        (12, 14), (14, 16)  # right leg
-    ]
-
-    for pose in poses:
-        kps = pose["keypoints"]
-        for i, j in skeleton_connections:
-            if kps[i][2] > 0.3 and kps[j][2] > 0.3:
-                pt1 = (int(kps[i][0]), int(kps[i][1]))
-                pt2 = (int(kps[j][0]), int(kps[j][1]))
-                cv2.line(frame, pt1, pt2, (255, 165, 0), 2)
-
-        # Draw keypoints
-        for kp in kps:
-            if kp[2] > 0.3:
-                cv2.circle(frame, (int(kp[0]), int(kp[1])), 3, (0, 255, 255), -1)
 
     # Flash red border if dump event detected
     if events:
@@ -214,14 +190,11 @@ def main():
             # Stage 1: Object detection with tracking
             detections = detector.detect(frame)
 
-            # Stage 2: Pose estimation
-            poses = detector.detect_pose(frame)
-
-            # Stage 3 & 4: Update tracker (tracking + temporal analysis)
+            # Stage 2: Update tracker (tracking + temporal analysis)
             tracked_data = tracker.update(detections)
 
-            # Stage 5, 6, 7: Analyze for dump events
-            confirmed_events = analyzer.analyze(tracked_data, poses)
+            # Stage 3: Analyze for dump events
+            confirmed_events = analyzer.analyze(tracked_data)
 
             # Log confirmed incidents
             for event in confirmed_events:
@@ -260,7 +233,7 @@ def main():
 
             # Draw everything on frame
             display_frame = draw_detections(
-                frame.copy(), detections, tracked_data, poses, confirmed_events, fps
+                frame.copy(), detections, tracked_data, confirmed_events, fps
             )
 
             # Show frame

@@ -70,7 +70,6 @@ def process_video(upload_id, video_path, progress_callback=None):
 
             # Run detection (without persistent tracking for sampled frames)
             detections = detector.detect_for_video(frame)
-            poses = detector.detect_pose_for_video(frame)
 
             # For video analysis, we use a simplified approach:
             # Check if person + waste are in proximity in the same frame
@@ -92,22 +91,11 @@ def process_video(upload_id, video_path, progress_callback=None):
                         dist = ((wx - px) ** 2 + (wy - py) ** 2) ** 0.5
 
                         if dist <= PROXIMITY_THRESHOLD:
-                            # Check pose for throwing action
-                            pose_score = 0.0
-                            for pose in poses:
-                                # Simple check: is any wrist below the elbow?
-                                kps = pose["keypoints"]
-                                for wrist_idx, elbow_idx in [(9, 7), (10, 8)]:
-                                    if (kps[wrist_idx][2] > 0.3 and
-                                            kps[elbow_idx][2] > 0.3 and
-                                            kps[wrist_idx][1] > kps[elbow_idx][1]):
-                                        pose_score = max(pose_score, 0.6)
-
-                            # Calculate confidence — weighted by detection and pose evidence
+                            # Calculate confidence — weighted by detection and proximity
                             detection_conf = (waste_obj["confidence"] + person["confidence"]) / 2
-                            # Proximity factor: small bonus for person being near waste (scales with closeness)
-                            proximity_factor = max(0, 1.0 - dist / PROXIMITY_THRESHOLD) * 0.2
-                            confidence = detection_conf * 0.5 + pose_score * 0.3 + proximity_factor
+                            # Proximity factor: bonus for person being close (scales with closeness)
+                            proximity_factor = max(0, 1.0 - dist / PROXIMITY_THRESHOLD) * 0.3
+                            confidence = detection_conf * 0.7 + proximity_factor
 
                             if confidence > 0.3:
                                 # Save snapshot

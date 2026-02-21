@@ -1,12 +1,12 @@
 # AI-Based Illegal Garbage Dumping Detection System
 
-Real-time detection of illegal garbage dumping using AI-powered computer vision. Uses YOLOv8 for object detection and pose estimation with a 7-stage analysis pipeline for high accuracy.
+Real-time detection of illegal garbage dumping using AI-powered computer vision. Uses YOLOv8 for object detection combined with a multi-stage temporal analysis pipeline for high accuracy.
 
 ## Features
 
 - **Real-time detection** from webcam, mobile phone (IP Webcam), or CCTV/RTSP cameras
 - **Video upload analysis** — upload recorded footage for batch processing
-- **7-stage detection pipeline** — object detection, pose estimation, tracking, temporal analysis, proximity check, confidence accumulation, cooldown
+- **Multi-stage detection pipeline** — object detection, tracking, temporal analysis, proximity check, confidence accumulation, cooldown
 - **Separate camera window** — live feed runs in a native OpenCV window, not in the browser
 - **Streamlit dashboard** — incident management, stats, camera management, video upload
 - **GPU accelerated** — CUDA support for NVIDIA RTX GPUs (auto-falls back to CPU)
@@ -14,7 +14,7 @@ Real-time detection of illegal garbage dumping using AI-powered computer vision.
 ## Tech Stack
 
 - **Python 3.10+**
-- **YOLOv8** (ultralytics) — object detection + pose estimation
+- **YOLOv8** (ultralytics) — object detection
 - **OpenCV** — camera capture + frame processing
 - **Streamlit** — web dashboard
 - **SQLite** — incident database
@@ -69,17 +69,12 @@ streamlit run app.py
 4. In the dashboard → Camera Management → Add Camera → type: `ip_stream`, URL: `http://YOUR_IP:8080/video`
 5. Ensure phone and laptop are on the same WiFi network
 
-## Detection Pipeline
-
-```
-Frame → [1] YOLOv8s object detection (person + waste) on CUDA
-      → [2] YOLOv8s-pose estimation (throwing/dropping body pose)
-      → [3] Object tracking (ByteTrack — persistent IDs)
-      → [4] Temporal analysis (newly appeared waste vs pre-existing)
-      → [5] Proximity + zone check
-      → [6] Confidence accumulator + cooldown
-      → [7] Confirmed incident → log + snapshot
-```
+Frame → [1] YOLOv8s object detection (person + waste)
+      → [2] Object tracking (ByteTrack — persistent IDs)
+      → [3] Temporal analysis (newly appeared waste vs pre-existing)
+      → [4] Proximity + zone check
+      → [5] Confidence accumulator + cooldown
+      → [6] Confirmed incident → log + snapshot
 
 ## Project Structure
 
@@ -87,7 +82,7 @@ Frame → [1] YOLOv8s object detection (person + waste) on CUDA
 ai-garbage-detect/
 ├── app.py                 # Streamlit dashboard
 ├── live_monitor.py        # OpenCV live camera window
-├── detector.py            # YOLOv8 detection + pose wrapper
+├── detector.py            # YOLOv8 detection wrapper
 ├── tracker.py             # Object tracking + temporal analysis
 ├── dump_analyzer.py       # Dump event analysis engine
 ├── camera_manager.py      # Camera source management
@@ -105,5 +100,4 @@ Edit `config.py` to adjust:
 - Proximity distance for person-waste association
 - Frame accumulation count for confirming events
 - Cooldown duration between incidents
-- Pose analysis thresholds
 - Video frame sampling rate
