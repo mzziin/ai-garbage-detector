@@ -478,12 +478,17 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
                 scale_y = orig_h / small_h
 
                 detections = detector.detect(small)
-                
+
                 # Update tracker with detections
                 tracked_data = tracker.update(detections)
-                last_persons = detections["persons"]
-                last_waste = detections["waste"]
-                last_cars = detections.get("cars", [])
+
+                # Run analyzer BEFORE scaling display boxes; tracker/analyzer operate in inference coordinates.
+                confirmed_events = analyzer.analyze(tracked_data)
+
+                # Cache detections for drawing/logging and scale only these copies.
+                last_persons = [{**d, "box": d["box"][:]} for d in detections["persons"]]
+                last_waste = [{**d, "box": d["box"][:]} for d in detections["waste"]]
+                last_cars = [{**d, "box": d["box"][:]} for d in detections.get("cars", [])]
 
                 # Scale boxes back to original resolution
                 for det in last_persons + last_waste + last_cars:
@@ -494,9 +499,6 @@ def _render_dashboard_stream(selected_camera_id, selected_camera):
                         int(det["box"][3] * scale_y),
                     ]
 
-                # Run analyzer
-                confirmed_events = analyzer.analyze(tracked_data)
-                
                 last_alert = len(confirmed_events) > 0
                 from dump_analyzer import INCIDENT_TYPE_CAR_LITTER
                 car_litter_alert = any(
@@ -644,6 +646,8 @@ def page_video_upload():
 
             progress_bar = st.progress(0)
             status_text = st.empty()
+            preview_text = st.empty()
+            preview_frame = st.empty()
 
             def progress_callback(processed, total):
                 if total > 0:
@@ -651,8 +655,21 @@ def page_video_upload():
                     progress_bar.progress(pct)
                     status_text.text(f"Processed {processed}/{total} sampled frames...")
 
+            def frame_callback(frame_bgr, frame_number, timestamp_in_video, incidents_found):
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                preview_text.markdown(
+                    f"**Live Detection Preview**  |  Frame: `{frame_number}`  |  "
+                    f"Time: `{timestamp_in_video:.1f}s`  |  Incidents: `{incidents_found}`"
+                )
+                preview_frame.image(frame_rgb, channels="RGB", use_container_width=True, width='stretch')
+
             from video_processor import process_video
-            results = process_video(upload_id, save_path, progress_callback)
+            results = process_video(
+                upload_id,
+                save_path,
+                progress_callback=progress_callback,
+                frame_callback=frame_callback
+            )
 
             progress_bar.progress(1.0)
             status_text.text("✅ Processing complete!")

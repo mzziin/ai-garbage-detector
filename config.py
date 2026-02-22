@@ -31,17 +31,21 @@ DETECTION_MODEL = "yolov8s.pt" if DEVICE == "cuda" else "yolov8n.pt"
 # Minimum confidence for YOLOv8 object detection
 DETECTION_CONFIDENCE = 0.4
 
-# COCO class IDs considered as waste-candidate objects
+# COCO class IDs considered as waste-candidate objects (general dumping pipeline)
 # person=0, bottle=39, cup=41, handbag=26, backpack=24, umbrella=25, suitcase=28
 PERSON_CLASS_ID = 0
 WASTE_CLASS_IDS = [39, 41, 26, 24, 25, 28]
 
 # COCO class IDs for vehicles (car=2, bus=5, truck=7) — for car garbage-throwing detection
 CAR_CLASS_IDS = [2, 5, 7]
+# Vehicle-litter candidates (expanded by request): include common carried items too.
+CAR_LITTER_WASTE_CLASS_NAMES = {"bottle", "cup", "handbag", "backpack", "umbrella", "suitcase"}
 # Maximum pixel distance between waste and vehicle to consider "car litter"
 CAR_PROXIMITY_THRESHOLD = 250
 # Frames waste must be near a car to confirm car-litter event
 CAR_LITTER_ACCUMULATION_THRESHOLD = 4
+# Waste track must still be "recent" to qualify as a throw-from-vehicle signal.
+CAR_LITTER_MAX_WASTE_AGE_FRAMES = 20
 
 # ============================================================
 # Dump Analyzer Settings
@@ -110,6 +114,8 @@ VIDEO_PERSON_LEFT_FRAMES = 2
 VIDEO_WASTE_STATIONARY_NEAR_PERSON_FRAMES = 2
 # Min frames waste near car to confirm car-litter (same for video and live)
 VIDEO_CAR_LITTER_ACCUMULATION_FRAMES = 2
+# Car-litter candidate must be a recent track in sampled frames.
+VIDEO_CAR_LITTER_MAX_TRACK_AGE = 6
 # Max pixel distance to match a detection to the same "waste track" across frames
 VIDEO_MATCH_DISTANCE = 80
 

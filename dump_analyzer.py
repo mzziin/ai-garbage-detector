@@ -5,6 +5,7 @@ from collections import defaultdict
 from config import (
     PROXIMITY_THRESHOLD, WEIGHT_DETECTION, WEIGHT_TEMPORAL, WEIGHT_ACCUMULATION,
     WASTE_PERSISTENCE_FRAMES, DEFAULT_SAFE_ZONES, CAR_PROXIMITY_THRESHOLD,
+    CAR_LITTER_WASTE_CLASS_NAMES, CAR_LITTER_MAX_WASTE_AGE_FRAMES,
     # Same incident logic as video upload (one event = one incident)
     VIDEO_STATIONARY_THRESHOLD, VIDEO_PERSON_NEAR_FRAMES,
     VIDEO_PERSON_FAR_CONSECUTIVE_FRAMES, VIDEO_PERSON_LEFT_FRAMES,
@@ -138,6 +139,11 @@ class CarLitterEvent:
         self.accumulated_frames += 1
         self.detection_confidences.append(detection_conf)
 
+    def reset(self):
+        """Reset evidence so car-near accumulation must be consecutive."""
+        self.accumulated_frames = 0
+        self.detection_confidences.clear()
+
     def is_confirmed(self):
         return self.accumulated_frames >= VIDEO_CAR_LITTER_ACCUMULATION_FRAMES
 
@@ -181,8 +187,9 @@ class DumpAnalyzer:
         new_waste = tracked_data["new_waste"]
         persons = tracked_data["persons"]
 
-        # Track grid regions with ANY waste in this frame
-        active_waste_ids = {w.track_id for w in new_waste}
+        # Track waste visibility in this frame.
+        active_new_waste_ids = {w.track_id for w in new_waste}
+        active_all_waste_ids = set(tracked_data.get("waste", {}).keys())
 
         # Check each new waste object
         for waste_obj in new_waste:
@@ -245,24 +252,43 @@ class DumpAnalyzer:
 
         # Clean up events for waste that is NO LONGER detected
         # (Wait... if it's no longer detected, maybe it was picked up? That's fine.)
-        keys_to_remove = [k for k in self.active_events if k not in active_waste_ids]
+        keys_to_remove = [k for k in self.active_events if k not in active_new_waste_ids]
         for k in keys_to_remove:
             # If the person left and THEN the waste disappeared, maybe it was a false positive detection
             # or it was picked up. We don't trigger if it disappeared.
             del self.active_events[k]
 
-        # ---- Car-litter: waste near vehicle ----
+        # ---- Car-litter: recent waste near vehicle for CONSECUTIVE frames ----
         cars = tracked_data.get("cars", [])
-        for waste_obj in new_waste:
+        all_waste = tracked_data.get("waste", {}).values()
+        for waste_obj in all_waste:
+            event_key = waste_obj.track_id
+
             if self._is_in_safe_zone(waste_obj.box):
+                if event_key in self.car_litter_events:
+                    del self.car_litter_events[event_key]
                 continue
+
+            # Restrict to plausible disposable objects for vehicle litter incidents.
+            if waste_obj.class_name not in CAR_LITTER_WASTE_CLASS_NAMES:
+                if event_key in self.car_litter_events:
+                    del self.car_litter_events[event_key]
+                continue
+
+            # Ignore old/pre-existing tracks; car-litter should be tied to new appearance.
+            if waste_obj.frames_seen > CAR_LITTER_MAX_WASTE_AGE_FRAMES:
+                if event_key in self.car_litter_events:
+                    del self.car_litter_events[event_key]
+                continue
+
             waste_center = waste_obj.center()
+            near_any_car = False
             for car_idx, car in enumerate(cars):
                 car_box = car["box"]
                 car_center = ((car_box[0] + car_box[2]) // 2, (car_box[1] + car_box[3]) // 2)
                 dist = self._distance(waste_center, car_center)
                 if dist <= CAR_PROXIMITY_THRESHOLD:
-                    event_key = waste_obj.track_id
+                    near_any_car = True
                     if event_key not in self.car_litter_events:
                         self.car_litter_events[event_key] = CarLitterEvent(
                             waste_obj.track_id, car_idx, waste_center
@@ -276,10 +302,13 @@ class DumpAnalyzer:
                             self.cooldown_log[region_key] = time.time()
                             confirmed_events.append(ev)
                     break  # one car per waste
+            if not near_any_car and event_key in self.car_litter_events:
+                # Must be consecutive near-car frames.
+                self.car_litter_events[event_key].reset()
 
         # Clean up car_litter_events for waste no longer detected
         for wid in list(self.car_litter_events.keys()):
-            if wid not in active_waste_ids:
+            if wid not in active_all_waste_ids:
                 del self.car_litter_events[wid]
 
         # Clean up stale/old events

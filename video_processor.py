@@ -22,6 +22,7 @@ from config import (
     VIDEO_PERSON_NEAR_FRAMES, VIDEO_PERSON_FAR_CONSECUTIVE_FRAMES,
     VIDEO_PERSON_LEFT_FRAMES, VIDEO_WASTE_STATIONARY_NEAR_PERSON_FRAMES,
     VIDEO_MATCH_DISTANCE, VIDEO_CAR_LITTER_ACCUMULATION_FRAMES,
+    CAR_LITTER_WASTE_CLASS_NAMES, VIDEO_CAR_LITTER_MAX_TRACK_AGE,
 )
 from detector import Detector
 from database import update_video_upload, insert_video_detection, insert_incident, get_video_upload_camera_id
@@ -40,6 +41,37 @@ def _region_key(box, grid_size=VIDEO_COOLDOWN_REGION_GRID_SIZE):
     return (cx // grid_size, cy // grid_size)
 
 
+def _draw_video_detections(frame, persons, waste, cars, incidents_found, frame_number, timestamp_in_video):
+    """Draw lightweight detection overlays for UI playback preview."""
+    out = frame.copy()
+
+    for p in persons:
+        x1, y1, x2, y2 = p["box"]
+        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(out, f"Person {p['confidence']:.2f}", (x1, max(18, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+    for w in waste:
+        x1, y1, x2, y2 = w["box"]
+        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 0, 255), 2)
+        cv2.putText(out, f"{w['class_name']} {w['confidence']:.2f}", (x1, max(18, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+    for c in cars:
+        x1, y1, x2, y2 = c["box"]
+        cv2.rectangle(out, (x1, y1), (x2, y2), (255, 255, 0), 2)
+        cv2.putText(out, c["class_name"], (x1, max(18, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+
+    status = (
+        f"Frame: {frame_number} | Time: {timestamp_in_video:.1f}s | "
+        f"Persons: {len(persons)} | Waste: {len(waste)} | Vehicles: {len(cars)} | "
+        f"Incidents: {incidents_found}"
+    )
+    cv2.putText(out, status, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    return out
+
+
 class VideoWasteTrack:
     """
     Tracks one waste object across sampled frames. Confirms incident only when:
@@ -55,6 +87,7 @@ class VideoWasteTrack:
         self.confidence = confidence
         self.initial_center = initial_center
         self.last_center = initial_center
+        self.seen_frames = 1
         self.person_near_count = 0
         self.stationary_near_person_count = 0
         self.person_far_consecutive = 0
@@ -105,7 +138,7 @@ class VideoWasteTrack:
         self.initial_center = new_center
 
 
-def process_video(upload_id, video_path, progress_callback=None):
+def process_video(upload_id, video_path, progress_callback=None, frame_callback=None):
     """
     Process an uploaded video file for garbage dump detection.
 
@@ -182,6 +215,7 @@ def process_video(upload_id, video_path, progress_callback=None):
                         best_dist = d
                         best_id = tid
 
+                track_existed = best_id is not None
                 if best_id is None:
                     best_id = next_waste_id
                     next_waste_id += 1
@@ -191,6 +225,8 @@ def process_video(upload_id, video_path, progress_callback=None):
                 used_track_ids.add(best_id)
 
                 tr = waste_tracks[best_id]
+                if track_existed:
+                    tr.seen_frames += 1
                 tr.box = w_box
                 tr.class_name = w_class
                 tr.confidence = w_conf
@@ -250,13 +286,16 @@ def process_video(upload_id, video_path, progress_callback=None):
                     if tid in car_litter_frames:
                         del car_litter_frames[tid]
 
-            # ---- Car-litter: waste near vehicle for multiple frames + cooldown ----
+            # ---- Car-litter: recent waste near vehicle for CONSECUTIVE frames + cooldown ----
             if cars and waste:
                 car_centers = [_center(c["box"]) for c in cars]
                 for w in waste:
                     w_center = _center(w["box"])
-                    if not any(_distance(w_center, cc) <= CAR_PROXIMITY_THRESHOLD for cc in car_centers):
+                    if w["class_name"] not in CAR_LITTER_WASTE_CLASS_NAMES:
                         continue
+
+                    near_car = any(_distance(w_center, cc) <= CAR_PROXIMITY_THRESHOLD for cc in car_centers)
+
                     # Same track as person-dump (match by last_center)
                     match_id = None
                     best_d = VIDEO_MATCH_DISTANCE + 1
@@ -267,6 +306,21 @@ def process_video(upload_id, video_path, progress_callback=None):
                             match_id = tid
                     if match_id is None:
                         continue
+
+                    tr = waste_tracks.get(match_id)
+                    if tr is None:
+                        continue
+
+                    # Treat only recent tracks as "new throw" candidates.
+                    if tr.seen_frames > VIDEO_CAR_LITTER_MAX_TRACK_AGE:
+                        car_litter_frames.pop(match_id, None)
+                        continue
+
+                    if not near_car:
+                        # Must be consecutive near-car frames.
+                        car_litter_frames.pop(match_id, None)
+                        continue
+
                     car_litter_frames[match_id] = car_litter_frames.get(match_id, 0) + 1
                     if car_litter_frames[match_id] >= VIDEO_CAR_LITTER_ACCUMULATION_FRAMES:
                         region_key = _region_key(w["box"])
@@ -303,6 +357,11 @@ def process_video(upload_id, video_path, progress_callback=None):
                                 "incident_type": "car_litter"
                             })
                             car_litter_frames[match_id] = 0
+            elif waste and not cars:
+                # No vehicle in this sampled frame means near-car streak is broken.
+                for tid in list(car_litter_frames.keys()):
+                    if tid in current_waste_centers:
+                        del car_litter_frames[tid]
 
             update_video_upload(
                 upload_id,
@@ -311,6 +370,18 @@ def process_video(upload_id, video_path, progress_callback=None):
             )
             if progress_callback:
                 progress_callback(processed_count, max(1, total_frames // VIDEO_FRAME_SAMPLE_RATE))
+
+            if frame_callback:
+                preview = _draw_video_detections(
+                    frame=frame,
+                    persons=persons,
+                    waste=waste,
+                    cars=cars,
+                    incidents_found=incidents_found,
+                    frame_number=frame_number,
+                    timestamp_in_video=timestamp_in_video,
+                )
+                frame_callback(preview, frame_number, timestamp_in_video, incidents_found)
 
     except Exception as e:
         print(f"[VideoProcessor] Error processing video: {e}")
