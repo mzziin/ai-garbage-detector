@@ -107,18 +107,15 @@ def page_dashboard():
     today_incidents = get_incident_count(today_only=True)
     total_incidents = get_incident_count(today_only=False)
     cameras = get_cameras()
-    uploads = get_video_uploads()
 
     st.subheader("📅 Today's overview")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Incidents reported today", today_incidents)
     with col2:
         st.metric("Total incidents (all time)", total_incidents)
     with col3:
         st.metric("Registered locations (cameras)", len(cameras))
-    with col4:
-        st.metric("Video uploads", len(uploads))
 
     st.markdown("---")
 
@@ -806,7 +803,7 @@ def page_camera_management():
             with col1:
                 source_display = cam.get("source_url") or f"Device {cam.get('device_index', 0)}"
                 st.markdown(
-                    f"**{cam['name']}** — `{cam['source_type']}` — `{source_display}`"
+                    f"**{cam['name']}** — `{cam['source_type']}`"
                 )
 
             with col2:
