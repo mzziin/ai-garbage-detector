@@ -7,6 +7,7 @@ from config import (
     WEIGHT_DETECTION, WEIGHT_TEMPORAL, WEIGHT_ACCUMULATION,
     WASTE_PERSISTENCE_FRAMES, DEFAULT_SAFE_ZONES,
     STATIONARY_THRESHOLD, PERSON_LEFT_FRAMES,
+    PERSON_FAR_CONSECUTIVE_FRAMES, MIN_WASTE_STATIONARY_NEAR_PERSON_FRAMES,
     CAR_PROXIMITY_THRESHOLD, CAR_LITTER_ACCUMULATION_THRESHOLD,
 )
 
@@ -33,35 +34,47 @@ class DumpEvent:
         self.person_was_near_count = 0
         self.person_has_left = False
         self.frames_since_left = 0
+        self.person_far_consecutive_frames = 0  # must reach threshold before we set person_has_left
         self.initial_waste_center = initial_center
         self.is_stationary = True
         self.confirmed = False
+        # Waste must be seen stationary (not moving with person) while person was near = "placed", not "carried"
+        self.waste_stationary_near_person_count = 0
 
     def update_state(self, is_near, current_center, detection_conf, temporal_score):
         """Update the state machine with current frame information."""
         self.person_is_near = is_near
-        
-        # 1. Check if waste is still stationary
+
+        # 1. How much did the waste move from its reference position?
         dist_moved = math.sqrt(
             (current_center[0] - self.initial_waste_center[0])**2 +
             (current_center[1] - self.initial_waste_center[1])**2
         )
         if dist_moved > STATIONARY_THRESHOLD:
             self.is_stationary = False
-        
-        # 2. Accumulate evidence while person is near
+
+        # 2. While person is near: did waste stay put (placed) or move (carried)?
         if is_near:
             self.person_was_near_count += 1
             self.frames_since_left = 0
             self.person_has_left = False
+            self.person_far_consecutive_frames = 0
+            if dist_moved <= STATIONARY_THRESHOLD:
+                self.waste_stationary_near_person_count += 1
+            else:
+                self.waste_stationary_near_person_count = 0  # waste moving = being carried
             self.accumulated_frames += 1
             self.detection_confidences.append(detection_conf)
             self.temporal_scores.append(temporal_score)
         else:
-            # 3. Handle person leaving
+            # 3. Person is far: require CONSECUTIVE far frames before we consider "person left"
+            self.person_far_consecutive_frames += 1
             if self.person_was_near_count >= FRAME_ACCUMULATION_THRESHOLD:
-                self.person_has_left = True
-                self.frames_since_left += 1
+                if self.person_far_consecutive_frames >= PERSON_FAR_CONSECUTIVE_FRAMES:
+                    if not self.person_has_left:
+                        self.person_has_left = True
+                        self.frames_since_left = 0
+                    self.frames_since_left += 1
 
     def reset(self):
         """Reset accumulation if conditions stop being met."""
@@ -69,6 +82,8 @@ class DumpEvent:
         self.person_was_near_count = 0
         self.frames_since_left = 0
         self.person_has_left = False
+        self.person_far_consecutive_frames = 0
+        self.waste_stationary_near_person_count = 0
         self.detection_confidences.clear()
         self.temporal_scores.clear()
 
@@ -76,13 +91,15 @@ class DumpEvent:
         """
         Confirm ONLY if:
         - Person was near for enough frames
-        - Person has now moved away
-        - Waste has remained stationary
+        - Waste was seen stationary (not moving with person) while person was near = placed, not carried
+        - Person has been far for enough consecutive frames, then left for PERSON_LEFT_FRAMES
+        - Waste has remained stationary after person left
         """
         return (
-            self.person_has_left and 
+            self.person_has_left and
             self.frames_since_left >= PERSON_LEFT_FRAMES and
-            self.is_stationary
+            self.is_stationary and
+            self.waste_stationary_near_person_count >= MIN_WASTE_STATIONARY_NEAR_PERSON_FRAMES
         )
 
     def final_confidence(self):
@@ -279,7 +296,7 @@ class DumpAnalyzer:
         # Higher score if waste has persisted for more frames
         persistence_ratio = min(waste_obj.frames_seen / WASTE_PERSISTENCE_FRAMES, 1.0)
         return persistence_ratio
-
+ 
     def _is_in_safe_zone(self, box):
         """Check if a bounding box center falls within any safe zone."""
         cx = (box[0] + box[2]) // 2

@@ -1,41 +1,120 @@
 """
 Video Processor — Analyzes uploaded video files for garbage dumping events.
 
-Processes frames at a configurable sample rate, runs the detection pipeline,
-and logs any detected incidents to the database.
+Processes frames at a configurable sample rate. Uses multi-frame confirmation:
+- Incident only when a person was near an object, the object stayed stationary,
+  and the person moved away (object left behind). If the object moves with the
+  person until they leave frame, no incident is marked.
+- No incident if no waste object is detected (person alone does not trigger).
+- Cooldown and region-based dedup ensure one event produces one incident.
 """
 
 import os
+import math
 import cv2
-import json
 from datetime import datetime
 
 from config import (
-    EVIDENCE_DIR, VIDEO_FRAME_SAMPLE_RATE, DEVICE,
+    EVIDENCE_DIR, VIDEO_FRAME_SAMPLE_RATE,
     PROXIMITY_THRESHOLD, CAR_PROXIMITY_THRESHOLD,
+    VIDEO_COOLDOWN_SECONDS, VIDEO_COOLDOWN_REGION_GRID_SIZE,
+    VIDEO_STATIONARY_THRESHOLD,
+    VIDEO_PERSON_NEAR_FRAMES, VIDEO_PERSON_FAR_CONSECUTIVE_FRAMES,
+    VIDEO_PERSON_LEFT_FRAMES, VIDEO_WASTE_STATIONARY_NEAR_PERSON_FRAMES,
+    VIDEO_MATCH_DISTANCE,
 )
 from detector import Detector
-from database import (
-    update_video_upload, insert_video_detection
-)
+from database import update_video_upload, insert_video_detection
+
+
+def _center(box):
+    return ((box[0] + box[2]) // 2, (box[1] + box[3]) // 2)
+
+
+def _distance(p1, p2):
+    return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+
+
+def _region_key(box, grid_size=VIDEO_COOLDOWN_REGION_GRID_SIZE):
+    cx, cy = _center(box)
+    return (cx // grid_size, cy // grid_size)
+
+
+class VideoWasteTrack:
+    """
+    Tracks one waste object across sampled frames. Confirms incident only when:
+    - Person was near for enough frames,
+    - Waste was stationary (not moving with person),
+    - Person moved away and stayed away for enough frames.
+    """
+
+    def __init__(self, track_id, box, class_name, confidence, initial_center):
+        self.track_id = track_id
+        self.box = box
+        self.class_name = class_name
+        self.confidence = confidence
+        self.initial_center = initial_center
+        self.last_center = initial_center
+        self.person_near_count = 0
+        self.stationary_near_person_count = 0
+        self.person_far_consecutive = 0
+        self.person_has_left = False
+        self.frames_since_left = 0
+        self.is_stationary = True
+        self.confirmed = False
+
+    def update_state(self, person_near, current_center, detection_conf):
+        dist_moved = _distance(current_center, self.initial_center)
+        if dist_moved > VIDEO_STATIONARY_THRESHOLD:
+            self.is_stationary = False
+
+        if person_near:
+            self.person_far_consecutive = 0
+            self.person_has_left = False
+            self.frames_since_left = 0
+            self.person_near_count += 1
+            if dist_moved <= VIDEO_STATIONARY_THRESHOLD:
+                self.stationary_near_person_count += 1
+            else:
+                self.stationary_near_person_count = 0
+        else:
+            self.person_far_consecutive += 1
+            if self.person_near_count >= VIDEO_PERSON_NEAR_FRAMES:
+                if self.person_far_consecutive >= VIDEO_PERSON_FAR_CONSECUTIVE_FRAMES:
+                    if not self.person_has_left:
+                        self.person_has_left = True
+                        self.frames_since_left = 0
+                    self.frames_since_left += 1
+
+    def is_confirmed(self):
+        return (
+            self.person_has_left
+            and self.frames_since_left >= VIDEO_PERSON_LEFT_FRAMES
+            and self.is_stationary
+            and self.stationary_near_person_count >= VIDEO_WASTE_STATIONARY_NEAR_PERSON_FRAMES
+        )
+
+    def reset_motion(self, new_center):
+        """Reset accumulation when waste moves too much (e.g. carried away)."""
+        self.person_near_count = 0
+        self.stationary_near_person_count = 0
+        self.person_far_consecutive = 0
+        self.person_has_left = False
+        self.frames_since_left = 0
+        self.is_stationary = True
+        self.initial_center = new_center
 
 
 def process_video(upload_id, video_path, progress_callback=None):
     """
     Process an uploaded video file for garbage dump detection.
 
-    Args:
-        upload_id: Database ID of the video_uploads record
-        video_path: Full path to the video file
-        progress_callback: Optional callable(processed_frames, total_frames)
-                          for progress updates (used by Streamlit)
-
-    Returns:
-        dict with:
-            - "total_frames": int
-            - "processed_frames": int
-            - "incidents_found": int
-            - "detections": list of detection dicts
+    Logic (mobile / short-range footage):
+    - Only report incident when: person was near an object, object stayed
+      stationary in frame, and person moved away (object left behind).
+    - If object moves with person (e.g. carried), no incident.
+    - No incident if no waste object is detected.
+    - Cooldown ensures one event produces one incident per region.
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -48,12 +127,19 @@ def process_video(upload_id, video_path, progress_callback=None):
 
     update_video_upload(upload_id, status="processing", processed_frames=0)
 
-    # Initialize detection components
     detector = Detector()
 
     processed_count = 0
     incidents_found = 0
     all_detections = []
+
+    # Waste tracks: track_id -> VideoWasteTrack (matched across frames by position)
+    waste_tracks = {}
+    next_waste_id = 0
+    # Cooldown: region_key -> last incident timestamp (in video seconds)
+    cooldown_log = {}
+    # Car-litter: simple accumulation per "waste track" + cooldown (one incident per event)
+    car_litter_frames = {}  # waste_track_id -> frames near car (we'll key by matched track)
     frame_number = 0
 
     try:
@@ -63,114 +149,150 @@ def process_video(upload_id, video_path, progress_callback=None):
                 break
 
             frame_number += 1
-
-            # Sample every Nth frame
             if frame_number % VIDEO_FRAME_SAMPLE_RATE != 0:
                 continue
 
             processed_count += 1
             timestamp_in_video = frame_number / fps
 
-            # Run detection (without persistent tracking for sampled frames)
             detections = detector.detect_for_video(frame)
-
-            # For video analysis: person-waste proximity (person_dump) and car-waste (car_litter)
             persons = detections["persons"]
             waste = detections["waste"]
             cars = detections.get("cars", [])
 
-            # Person-dump: person + waste in proximity
-            if persons and waste:
-                for waste_obj in waste:
-                    wx = (waste_obj["box"][0] + waste_obj["box"][2]) // 2
-                    wy = (waste_obj["box"][1] + waste_obj["box"][3]) // 2
+            # ---- Person-dump: only if waste is present; confirm when object stationary + person left ----
+            person_centers = [_center(p["box"]) for p in persons]
+            current_waste_centers = {}  # track_id -> center for cleanup
 
-                    for person in persons:
-                        px = (person["box"][0] + person["box"][2]) // 2
-                        py = (person["box"][1] + person["box"][3]) // 2
+            # Match each waste detection to nearest track by last position (greedy)
+            used_track_ids = set()
+            for w in waste:
+                w_center = _center(w["box"])
+                w_box = w["box"]
+                w_class = w["class_name"]
+                w_conf = w["confidence"]
 
-                        dist = ((wx - px) ** 2 + (wy - py) ** 2) ** 0.5
+                best_id = None
+                best_dist = VIDEO_MATCH_DISTANCE + 1
+                for tid, tr in waste_tracks.items():
+                    if tid in used_track_ids:
+                        continue
+                    d = _distance(tr.last_center, w_center)
+                    if d <= VIDEO_MATCH_DISTANCE and d < best_dist:
+                        best_dist = d
+                        best_id = tid
 
-                        if dist <= PROXIMITY_THRESHOLD:
-                            detection_conf = (waste_obj["confidence"] + person["confidence"]) / 2
-                            proximity_factor = max(0, 1.0 - dist / PROXIMITY_THRESHOLD) * 0.3
-                            confidence = detection_conf * 0.7 + proximity_factor
+                if best_id is None:
+                    best_id = next_waste_id
+                    next_waste_id += 1
+                    waste_tracks[best_id] = VideoWasteTrack(
+                        best_id, w_box, w_class, w_conf, w_center
+                    )
+                used_track_ids.add(best_id)
 
-                            if confidence > 0.3:
-                                snapshot_path = _save_video_snapshot(
-                                    frame, upload_id, frame_number
-                                )
-                                objects_detected = [waste_obj["class_name"]]
-                                insert_video_detection(
-                                    upload_id=upload_id,
-                                    frame_number=frame_number,
-                                    timestamp_in_video=round(timestamp_in_video, 2),
-                                    confidence=round(confidence, 3),
-                                    snapshot_path=snapshot_path,
-                                    objects_detected=objects_detected,
-                                    incident_type="person_dump"
-                                )
-                                incidents_found += 1
-                                all_detections.append({
-                                    "frame_number": frame_number,
-                                    "timestamp": round(timestamp_in_video, 2),
-                                    "confidence": round(confidence, 3),
-                                    "objects": objects_detected,
-                                    "snapshot_path": snapshot_path,
-                                    "incident_type": "person_dump"
-                                })
-                                break
+                tr = waste_tracks[best_id]
+                tr.box = w_box
+                tr.class_name = w_class
+                tr.confidence = w_conf
+                tr.last_center = w_center
+                current_waste_centers[best_id] = w_center
 
-            # Car-litter: vehicle + waste in proximity (same frame)
+                # Is any person near this waste?
+                person_near = False
+                if person_centers:
+                    min_dist = min(_distance(w_center, pc) for pc in person_centers)
+                    person_near = min_dist <= PROXIMITY_THRESHOLD
+
+                tr.update_state(person_near, w_center, w_conf)
+
+                if tr.is_confirmed() and not tr.confirmed:
+                    region_key = _region_key(w_box)
+                    last_time = cooldown_log.get(region_key, -1e9)
+                    if timestamp_in_video - last_time >= VIDEO_COOLDOWN_SECONDS:
+                        tr.confirmed = True
+                        cooldown_log[region_key] = timestamp_in_video
+                        snapshot_path = _save_video_snapshot(frame, upload_id, frame_number)
+                        insert_video_detection(
+                            upload_id=upload_id,
+                            frame_number=frame_number,
+                            timestamp_in_video=round(timestamp_in_video, 2),
+                            confidence=round(tr.confidence, 3),
+                            snapshot_path=snapshot_path,
+                            objects_detected=[tr.class_name],
+                            incident_type="person_dump"
+                        )
+                        incidents_found += 1
+                        all_detections.append({
+                            "frame_number": frame_number,
+                            "timestamp": round(timestamp_in_video, 2),
+                            "confidence": round(tr.confidence, 3),
+                            "objects": [tr.class_name],
+                            "snapshot_path": snapshot_path,
+                            "incident_type": "person_dump"
+                        })
+
+                if not tr.is_stationary:
+                    tr.reset_motion(w_center)
+
+            # Remove tracks not seen this frame (waste left or occluded)
+            for tid in list(waste_tracks.keys()):
+                if tid not in current_waste_centers:
+                    del waste_tracks[tid]
+                    if tid in car_litter_frames:
+                        del car_litter_frames[tid]
+
+            # ---- Car-litter: waste near vehicle for multiple frames + cooldown ----
             if cars and waste:
-                for waste_obj in waste:
-                    wx = (waste_obj["box"][0] + waste_obj["box"][2]) // 2
-                    wy = (waste_obj["box"][1] + waste_obj["box"][3]) // 2
+                car_centers = [_center(c["box"]) for c in cars]
+                for w in waste:
+                    w_center = _center(w["box"])
+                    if not any(_distance(w_center, cc) <= CAR_PROXIMITY_THRESHOLD for cc in car_centers):
+                        continue
+                    # Same track as person-dump (match by last_center)
+                    match_id = None
+                    best_d = VIDEO_MATCH_DISTANCE + 1
+                    for tid, tr in waste_tracks.items():
+                        d = _distance(tr.last_center, w_center)
+                        if d <= VIDEO_MATCH_DISTANCE and d < best_d:
+                            best_d = d
+                            match_id = tid
+                    if match_id is None:
+                        continue
+                    car_litter_frames[match_id] = car_litter_frames.get(match_id, 0) + 1
+                    if car_litter_frames[match_id] >= 2:
+                        region_key = _region_key(w["box"])
+                        last_time = cooldown_log.get(region_key, -1e9)
+                        if timestamp_in_video - last_time >= VIDEO_COOLDOWN_SECONDS:
+                            cooldown_log[region_key] = timestamp_in_video
+                            conf = (w["confidence"] + 0.5) / 2
+                            snapshot_path = _save_video_snapshot(frame, upload_id, frame_number)
+                            insert_video_detection(
+                                upload_id=upload_id,
+                                frame_number=frame_number,
+                                timestamp_in_video=round(timestamp_in_video, 2),
+                                confidence=round(conf, 3),
+                                snapshot_path=snapshot_path,
+                                objects_detected=[w["class_name"], "vehicle"],
+                                incident_type="car_litter"
+                            )
+                            incidents_found += 1
+                            all_detections.append({
+                                "frame_number": frame_number,
+                                "timestamp": round(timestamp_in_video, 2),
+                                "confidence": round(conf, 3),
+                                "objects": [w["class_name"], "vehicle"],
+                                "snapshot_path": snapshot_path,
+                                "incident_type": "car_litter"
+                            })
+                            car_litter_frames[match_id] = 0
 
-                    for car in cars:
-                        cx = (car["box"][0] + car["box"][2]) // 2
-                        cy = (car["box"][1] + car["box"][3]) // 2
-                        dist = ((wx - cx) ** 2 + (wy - cy) ** 2) ** 0.5
-
-                        if dist <= CAR_PROXIMITY_THRESHOLD:
-                            conf = (waste_obj["confidence"] + car["confidence"]) / 2
-                            proximity_factor = max(0, 1.0 - dist / CAR_PROXIMITY_THRESHOLD) * 0.2
-                            confidence = conf * 0.8 + proximity_factor
-
-                            if confidence > 0.3:
-                                snapshot_path = _save_video_snapshot(
-                                    frame, upload_id, frame_number
-                                )
-                                objects_detected = [waste_obj["class_name"], car["class_name"]]
-                                insert_video_detection(
-                                    upload_id=upload_id,
-                                    frame_number=frame_number,
-                                    timestamp_in_video=round(timestamp_in_video, 2),
-                                    confidence=round(confidence, 3),
-                                    snapshot_path=snapshot_path,
-                                    objects_detected=objects_detected,
-                                    incident_type="car_litter"
-                                )
-                                incidents_found += 1
-                                all_detections.append({
-                                    "frame_number": frame_number,
-                                    "timestamp": round(timestamp_in_video, 2),
-                                    "confidence": round(confidence, 3),
-                                    "objects": objects_detected,
-                                    "snapshot_path": snapshot_path,
-                                    "incident_type": "car_litter"
-                                })
-                            break  # one car per waste
-
-            # Update progress
             update_video_upload(
                 upload_id,
                 processed_frames=processed_count,
                 incidents_found=incidents_found
             )
-
             if progress_callback:
-                progress_callback(processed_count, total_frames // VIDEO_FRAME_SAMPLE_RATE)
+                progress_callback(processed_count, max(1, total_frames // VIDEO_FRAME_SAMPLE_RATE))
 
     except Exception as e:
         print(f"[VideoProcessor] Error processing video: {e}")
@@ -179,10 +301,9 @@ def process_video(upload_id, video_path, progress_callback=None):
     finally:
         cap.release()
 
-    # Mark as completed
     update_video_upload(upload_id, status="completed",
-                        processed_frames=processed_count,
-                        incidents_found=incidents_found)
+                      processed_frames=processed_count,
+                      incidents_found=incidents_found)
 
     return {
         "total_frames": total_frames,

@@ -77,11 +77,39 @@ STATIONARY_THRESHOLD = 20
 # Number of frames to wait after person leaves before confirming a dump
 PERSON_LEFT_FRAMES = 10
 
+# Person must be far from waste for this many CONSECUTIVE frames before we consider "person left"
+# (avoids false positives when person is carrying waste and bboxes jitter)
+PERSON_FAR_CONSECUTIVE_FRAMES = 5
+
+# Waste must have been stationary (not moving with person) for this many frames WHILE person was near.
+# Ensures we only trigger when waste was placed/dropped, not carried (e.g. person walking with bag).
+MIN_WASTE_STATIONARY_NEAR_PERSON_FRAMES = 4
+
 # ============================================================
 # Video Processing
 # ============================================================
 # Process every Nth frame of uploaded videos
 VIDEO_FRAME_SAMPLE_RATE = 5
+
+# Video incident logic: one event = one incident (mobile / short-range footage)
+# Cooldown in video-time seconds after an incident (no duplicate in same region)
+VIDEO_COOLDOWN_SECONDS = 30
+# Grid size (pixels) for region-based cooldown
+VIDEO_COOLDOWN_REGION_GRID_SIZE = 150
+
+# Multi-frame confirmation (counts are in *sampled* frames, e.g. every 5th frame)
+# Max pixel movement for waste to be considered "stationary" (dropped, not carried)
+VIDEO_STATIONARY_THRESHOLD = 25
+# Min sampled frames with person near waste before we consider "person was with object"
+VIDEO_PERSON_NEAR_FRAMES = 2
+# Min consecutive sampled frames person must be far before we set "person left"
+VIDEO_PERSON_FAR_CONSECUTIVE_FRAMES = 2
+# Min sampled frames after "person left" before we confirm incident
+VIDEO_PERSON_LEFT_FRAMES = 2
+# Waste must be stationary (not moving with person) for this many frames while person was near
+VIDEO_WASTE_STATIONARY_NEAR_PERSON_FRAMES = 2
+# Max pixel distance to match a detection to the same "waste track" across frames
+VIDEO_MATCH_DISTANCE = 80
 
 # ============================================================
 # Safe Zones (can be configured per camera via Streamlit)
