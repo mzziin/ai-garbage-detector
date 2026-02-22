@@ -21,10 +21,10 @@ from config import (
     VIDEO_STATIONARY_THRESHOLD,
     VIDEO_PERSON_NEAR_FRAMES, VIDEO_PERSON_FAR_CONSECUTIVE_FRAMES,
     VIDEO_PERSON_LEFT_FRAMES, VIDEO_WASTE_STATIONARY_NEAR_PERSON_FRAMES,
-    VIDEO_MATCH_DISTANCE,
+    VIDEO_MATCH_DISTANCE, VIDEO_CAR_LITTER_ACCUMULATION_FRAMES,
 )
 from detector import Detector
-from database import update_video_upload, insert_video_detection
+from database import update_video_upload, insert_video_detection, insert_incident, get_video_upload_camera_id
 
 
 def _center(box):
@@ -221,6 +221,15 @@ def process_video(upload_id, video_path, progress_callback=None):
                             objects_detected=[tr.class_name],
                             incident_type="person_dump"
                         )
+                        camera_id = get_video_upload_camera_id()
+                        insert_incident(
+                            camera_id=camera_id,
+                            confidence=round(tr.confidence, 3),
+                            snapshot_path=snapshot_path,
+                            description=f"Video upload — frame {frame_number}",
+                            objects_detected=[tr.class_name],
+                            incident_type="person_dump"
+                        )
                         incidents_found += 1
                         all_detections.append({
                             "frame_number": frame_number,
@@ -259,7 +268,7 @@ def process_video(upload_id, video_path, progress_callback=None):
                     if match_id is None:
                         continue
                     car_litter_frames[match_id] = car_litter_frames.get(match_id, 0) + 1
-                    if car_litter_frames[match_id] >= 2:
+                    if car_litter_frames[match_id] >= VIDEO_CAR_LITTER_ACCUMULATION_FRAMES:
                         region_key = _region_key(w["box"])
                         last_time = cooldown_log.get(region_key, -1e9)
                         if timestamp_in_video - last_time >= VIDEO_COOLDOWN_SECONDS:
@@ -272,6 +281,15 @@ def process_video(upload_id, video_path, progress_callback=None):
                                 timestamp_in_video=round(timestamp_in_video, 2),
                                 confidence=round(conf, 3),
                                 snapshot_path=snapshot_path,
+                                objects_detected=[w["class_name"], "vehicle"],
+                                incident_type="car_litter"
+                            )
+                            camera_id = get_video_upload_camera_id()
+                            insert_incident(
+                                camera_id=camera_id,
+                                confidence=round(conf, 3),
+                                snapshot_path=snapshot_path,
+                                description=f"Video upload — frame {frame_number}",
                                 objects_detected=[w["class_name"], "vehicle"],
                                 incident_type="car_litter"
                             )

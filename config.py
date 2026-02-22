@@ -108,6 +108,8 @@ VIDEO_PERSON_FAR_CONSECUTIVE_FRAMES = 2
 VIDEO_PERSON_LEFT_FRAMES = 2
 # Waste must be stationary (not moving with person) for this many frames while person was near
 VIDEO_WASTE_STATIONARY_NEAR_PERSON_FRAMES = 2
+# Min frames waste near car to confirm car-litter (same for video and live)
+VIDEO_CAR_LITTER_ACCUMULATION_FRAMES = 2
 # Max pixel distance to match a detection to the same "waste track" across frames
 VIDEO_MATCH_DISTANCE = 80
 

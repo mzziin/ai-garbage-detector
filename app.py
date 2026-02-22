@@ -41,8 +41,9 @@ import pandas as pd
 
 from config import DEVICE, DETECTION_MODEL, UPLOADS_DIR, EVIDENCE_DIR
 from database import (
-    init_db, get_cameras, get_camera, get_incident_count, get_incidents,
-    get_incident, get_video_uploads, get_video_upload, get_video_detections
+    init_db, get_cameras, get_camera, get_incident_count, get_incident_count_by_camera,
+    get_incidents, get_incident, get_video_uploads, get_video_upload, get_video_detections,
+    VIDEO_UPLOAD_SOURCE_TYPE,
 )
 from camera_manager import add_camera, remove_camera, list_cameras, get_camera_source, test_camera_source
 
@@ -102,22 +103,66 @@ def page_dashboard():
     st.title("📊 Dashboard")
     st.markdown("Real-time overview of garbage dumping detection system.")
 
-    # Stats cards
-    col1, col2, col3, col4 = st.columns(4)
-
-    total_incidents = get_incident_count(today_only=False)
+    # Today's total incidents (primary metric)
     today_incidents = get_incident_count(today_only=True)
+    total_incidents = get_incident_count(today_only=False)
     cameras = get_cameras()
     uploads = get_video_uploads()
 
+    st.subheader("📅 Today's overview")
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Total Incidents", total_incidents)
+        st.metric("Incidents reported today", today_incidents)
     with col2:
-        st.metric("Today's Incidents", today_incidents)
+        st.metric("Total incidents (all time)", total_incidents)
     with col3:
-        st.metric("Registered Cameras", len(cameras))
+        st.metric("Registered locations (cameras)", len(cameras))
     with col4:
-        st.metric("Video Uploads", len(uploads))
+        st.metric("Video uploads", len(uploads))
+
+    st.markdown("---")
+
+    # Incidents by location (each camera = one location)
+    st.subheader("📍 Incidents by location (camera)")
+    by_camera_today = get_incident_count_by_camera(today_only=True)
+    by_camera_all = get_incident_count_by_camera(today_only=False)
+
+    if by_camera_today:
+        # Cards: one per location (camera_id), 4 per row
+        n = len(by_camera_today)
+        for start in range(0, n, 4):
+            row_slice = by_camera_today[start : start + 4]
+            cols = st.columns(len(row_slice))
+            for col, row in zip(cols, row_slice):
+                with col:
+                    loc_name = row["camera_name"] or f"Camera {row['camera_id']}"
+                    label = f"**{loc_name}**" + (f" (ID: {row['camera_id']})" if row["camera_id"] is not None else "")
+                    st.metric(label=label, value=row["count"], delta="today")
+    else:
+        st.info("No locations with incidents today. Registered cameras will appear here when incidents are reported.")
+
+    # Analytics: which location has highest incidents
+    st.markdown("---")
+    st.subheader("📈 Location analytics")
+    if by_camera_all:
+        top = by_camera_all[0]
+        top_name = top["camera_name"] or f"Camera {top['camera_id']}"
+        st.markdown(f"**Highest incidents (all time):** **{top_name}** with **{top['count']}** incidents.")
+        # Bar chart: incidents per location
+        df_loc = pd.DataFrame(by_camera_all)
+        df_loc["location"] = df_loc.apply(
+            lambda r: (r["camera_name"] or f"Camera {r['camera_id']}") + (f" (ID:{r['camera_id']})" if r["camera_id"] is not None else ""),
+            axis=1
+        )
+        fig = px.bar(
+            df_loc, x="location", y="count",
+            title="Incidents per location (all time)",
+            labels={"location": "Location (camera)", "count": "Incidents"}
+        )
+        fig.update_layout(xaxis_tickangle=-45)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No incident data by location yet. Analytics will appear once incidents are reported.")
 
     st.markdown("---")
 
@@ -131,8 +176,10 @@ def page_dashboard():
             itype = inc.get("incident_type") or "person_dump"
             type_label = "🚗 Car litter" if itype == "car_litter" else "🚶 Person dump"
             conf_str = f"{inc['confidence']:.1%}" if inc.get("confidence") is not None else "N/A"
+            cam = get_camera(inc["camera_id"]) if inc.get("camera_id") else None
+            location_label = f"{cam['name']} (ID: {inc['camera_id']})" if cam else (f"ID: {inc.get('camera_id')}" if inc.get('camera_id') else "Unknown / Video")
             with st.expander(
-                f"🚨 Incident #{inc['id']} — {type_label} — {inc['timestamp']} — Confidence: {conf_str}"
+                f"🚨 Incident #{inc['id']} — {type_label} — {inc['timestamp']} — {location_label} — Confidence: {conf_str}"
             ):
                 col_img, col_info = st.columns([1, 2])
 
@@ -146,7 +193,7 @@ def page_dashboard():
                 with col_info:
                     st.markdown(f"**Type:** {type_label}")
                     st.markdown(f"**Description:** {inc.get('description', '')}")
-                    st.markdown(f"**Camera ID:** {inc.get('camera_id')}")
+                    st.markdown(f"**Location (camera):** {location_label}")
                     st.markdown(f"**Confidence:** {conf_str}")
                     if inc.get("objects_detected"):
                         try:
@@ -181,7 +228,8 @@ def page_dashboard():
 def page_live_monitor():
     st.title("📹 Live Monitor")
 
-    cameras = list_cameras()
+    all_cameras = list_cameras()
+    cameras = [c for c in all_cameras if c.get("source_type") != VIDEO_UPLOAD_SOURCE_TYPE]
 
     if not cameras:
         st.warning("No cameras registered. Go to **Camera Management** to add one first.")
@@ -834,10 +882,12 @@ def page_incident_viewer():
             confidence_str = f"{inc['confidence']:.1%}" if inc.get("confidence") is not None else "N/A"
             itype = inc.get("incident_type") or "person_dump"
             type_label = "Car litter" if itype == "car_litter" else "Person dump"
+            cam = get_camera(inc["camera_id"]) if inc.get("camera_id") else None
+            location_label = f"{cam['name']} (ID: {inc['camera_id']})" if cam else (f"ID: {inc.get('camera_id')}" if inc.get('camera_id') else "Unknown / Video")
 
             with st.expander(
                 f"🚨 #{inc['id']} | {type_label} | {inc['timestamp']} | "
-                f"Confidence: {confidence_str} | Camera: {inc.get('camera_id')}"
+                f"Confidence: {confidence_str} | Location: {location_label}"
             ):
                 col_img, col_info = st.columns([1, 2])
 
@@ -852,7 +902,7 @@ def page_incident_viewer():
                     st.markdown(f"**Incident ID:** {inc['id']}")
                     st.markdown(f"**Type:** {type_label}")
                     st.markdown(f"**Timestamp:** {inc['timestamp']}")
-                    st.markdown(f"**Camera ID:** {inc.get('camera_id')}")
+                    st.markdown(f"**Location (camera):** {location_label}")
                     st.markdown(f"**Confidence:** {confidence_str}")
                     st.markdown(f"**Description:** {inc.get('description', '')}")
 

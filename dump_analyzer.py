@@ -3,12 +3,14 @@ import math
 import numpy as np
 from collections import defaultdict
 from config import (
-    PROXIMITY_THRESHOLD, FRAME_ACCUMULATION_THRESHOLD, COOLDOWN_SECONDS,
-    WEIGHT_DETECTION, WEIGHT_TEMPORAL, WEIGHT_ACCUMULATION,
-    WASTE_PERSISTENCE_FRAMES, DEFAULT_SAFE_ZONES,
-    STATIONARY_THRESHOLD, PERSON_LEFT_FRAMES,
-    PERSON_FAR_CONSECUTIVE_FRAMES, MIN_WASTE_STATIONARY_NEAR_PERSON_FRAMES,
-    CAR_PROXIMITY_THRESHOLD, CAR_LITTER_ACCUMULATION_THRESHOLD,
+    PROXIMITY_THRESHOLD, WEIGHT_DETECTION, WEIGHT_TEMPORAL, WEIGHT_ACCUMULATION,
+    WASTE_PERSISTENCE_FRAMES, DEFAULT_SAFE_ZONES, CAR_PROXIMITY_THRESHOLD,
+    # Same incident logic as video upload (one event = one incident)
+    VIDEO_STATIONARY_THRESHOLD, VIDEO_PERSON_NEAR_FRAMES,
+    VIDEO_PERSON_FAR_CONSECUTIVE_FRAMES, VIDEO_PERSON_LEFT_FRAMES,
+    VIDEO_WASTE_STATIONARY_NEAR_PERSON_FRAMES,
+    VIDEO_COOLDOWN_SECONDS, VIDEO_COOLDOWN_REGION_GRID_SIZE,
+    VIDEO_CAR_LITTER_ACCUMULATION_FRAMES,
 )
 
 
@@ -50,7 +52,7 @@ class DumpEvent:
             (current_center[0] - self.initial_waste_center[0])**2 +
             (current_center[1] - self.initial_waste_center[1])**2
         )
-        if dist_moved > STATIONARY_THRESHOLD:
+        if dist_moved > VIDEO_STATIONARY_THRESHOLD:
             self.is_stationary = False
 
         # 2. While person is near: did waste stay put (placed) or move (carried)?
@@ -59,7 +61,7 @@ class DumpEvent:
             self.frames_since_left = 0
             self.person_has_left = False
             self.person_far_consecutive_frames = 0
-            if dist_moved <= STATIONARY_THRESHOLD:
+            if dist_moved <= VIDEO_STATIONARY_THRESHOLD:
                 self.waste_stationary_near_person_count += 1
             else:
                 self.waste_stationary_near_person_count = 0  # waste moving = being carried
@@ -69,8 +71,8 @@ class DumpEvent:
         else:
             # 3. Person is far: require CONSECUTIVE far frames before we consider "person left"
             self.person_far_consecutive_frames += 1
-            if self.person_was_near_count >= FRAME_ACCUMULATION_THRESHOLD:
-                if self.person_far_consecutive_frames >= PERSON_FAR_CONSECUTIVE_FRAMES:
+            if self.person_was_near_count >= VIDEO_PERSON_NEAR_FRAMES:
+                if self.person_far_consecutive_frames >= VIDEO_PERSON_FAR_CONSECUTIVE_FRAMES:
                     if not self.person_has_left:
                         self.person_has_left = True
                         self.frames_since_left = 0
@@ -89,17 +91,17 @@ class DumpEvent:
 
     def is_confirmed(self):
         """
-        Confirm ONLY if:
+        Confirm ONLY if (same logic as video upload):
         - Person was near for enough frames
         - Waste was seen stationary (not moving with person) while person was near = placed, not carried
-        - Person has been far for enough consecutive frames, then left for PERSON_LEFT_FRAMES
+        - Person has been far for enough consecutive frames, then left for VIDEO_PERSON_LEFT_FRAMES
         - Waste has remained stationary after person left
         """
         return (
             self.person_has_left and
-            self.frames_since_left >= PERSON_LEFT_FRAMES and
+            self.frames_since_left >= VIDEO_PERSON_LEFT_FRAMES and
             self.is_stationary and
-            self.waste_stationary_near_person_count >= MIN_WASTE_STATIONARY_NEAR_PERSON_FRAMES
+            self.waste_stationary_near_person_count >= VIDEO_WASTE_STATIONARY_NEAR_PERSON_FRAMES
         )
 
     def final_confidence(self):
@@ -137,13 +139,13 @@ class CarLitterEvent:
         self.detection_confidences.append(detection_conf)
 
     def is_confirmed(self):
-        return self.accumulated_frames >= CAR_LITTER_ACCUMULATION_THRESHOLD
+        return self.accumulated_frames >= VIDEO_CAR_LITTER_ACCUMULATION_FRAMES
 
     def final_confidence(self):
         if not self.detection_confidences:
             return 0.0
         avg = sum(self.detection_confidences) / len(self.detection_confidences)
-        acc_factor = min(self.accumulated_frames / CAR_LITTER_ACCUMULATION_THRESHOLD, 1.0)
+        acc_factor = min(self.accumulated_frames / VIDEO_CAR_LITTER_ACCUMULATION_FRAMES, 1.0)
         return round(min(avg * 0.7 + acc_factor * 0.3, 1.0), 3)
 
 
@@ -309,13 +311,13 @@ class DumpAnalyzer:
         return False
 
     def _is_in_cooldown(self, region_key):
-        """Check if a region is still in cooldown after a recent incident."""
+        """Check if a region is still in cooldown after a recent incident (same as video)."""
         if region_key not in self.cooldown_log:
             return False
         elapsed = time.time() - self.cooldown_log[region_key]
-        return elapsed < COOLDOWN_SECONDS
+        return elapsed < VIDEO_COOLDOWN_SECONDS
 
-    def _region_key(self, box, grid_size=150):
+    def _region_key(self, box, grid_size=VIDEO_COOLDOWN_REGION_GRID_SIZE):
         """Map a bounding box to a region key for cooldown tracking."""
         cx = (box[0] + box[2]) // 2
         cy = (box[1] + box[3]) // 2

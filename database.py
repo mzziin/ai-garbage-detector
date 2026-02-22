@@ -88,6 +88,13 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        # Ensure "Video Upload" camera exists so incidents from uploads use a constant camera_id
+        cursor.execute(
+            "INSERT INTO cameras (name, source_type, source_url, device_index) "
+            "SELECT 'Video Upload', 'video_upload', NULL, 0 "
+            "WHERE NOT EXISTS (SELECT 1 FROM cameras WHERE source_type = 'video_upload')"
+        )
+
         conn.commit()
     finally:
         conn.close()
@@ -105,6 +112,35 @@ def insert_camera(name, source_type, source_url=None, device_index=0):
         cursor.execute(
             "INSERT INTO cameras (name, source_type, source_url, device_index) VALUES (?, ?, ?, ?)",
             (name, source_type, source_url, device_index)
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+# Source type for the synthetic "Video Upload" camera (used for incidents from uploaded videos)
+VIDEO_UPLOAD_SOURCE_TYPE = "video_upload"
+
+
+def get_video_upload_camera_id():
+    """
+    Return the camera_id for the 'Video Upload' source. This constant camera is used
+    so incidents from uploaded videos appear in Recent Incidents and Incident Viewer.
+    Creates the camera record if it does not exist.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id FROM cameras WHERE source_type = ? LIMIT 1",
+            (VIDEO_UPLOAD_SOURCE_TYPE,)
+        ).fetchone()
+        if row:
+            return row["id"]
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO cameras (name, source_type, source_url, device_index) VALUES (?, ?, ?, ?)",
+            ("Video Upload", VIDEO_UPLOAD_SOURCE_TYPE, None, 0)
         )
         conn.commit()
         return cursor.lastrowid
@@ -212,6 +248,54 @@ def get_incident_count(today_only=False):
         else:
             result = conn.execute("SELECT COUNT(*) as count FROM incidents").fetchone()
         return result["count"]
+    finally:
+        conn.close()
+
+
+def get_incident_count_by_camera(today_only=False):
+    """
+    Get incident count per location (camera_id). Returns list of dicts with
+    camera_id, camera_name, count. Includes all registered cameras (count 0 if none).
+    Also includes one row for incidents with NULL camera_id as 'Unknown / Video'.
+    """
+    conn = get_connection()
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        date_filter = " AND date(i.timestamp) = ?" if today_only else ""
+        params = [today] if today_only else []
+
+        # Counts per camera (only cameras that have incidents)
+        sql = """
+            SELECT c.id AS camera_id, c.name AS camera_name, COUNT(i.id) AS count
+            FROM cameras c
+            LEFT JOIN incidents i ON i.camera_id = c.id
+            """ + (" AND date(i.timestamp) = ?" if today_only else "") + """
+            GROUP BY c.id, c.name
+        """
+        if today_only:
+            # For LEFT JOIN with date filter we need the condition in ON or WHERE carefully
+            sql = """
+                SELECT c.id AS camera_id, c.name AS camera_name,
+                       (SELECT COUNT(*) FROM incidents WHERE camera_id = c.id AND date(timestamp) = ?) AS count
+                FROM cameras c
+            """
+            params = [today]
+
+        rows = conn.execute(sql, params).fetchall()
+        result = [{"camera_id": r["camera_id"], "camera_name": r["camera_name"], "count": r["count"]} for r in rows]
+
+        # Add row for incidents with NULL camera_id (e.g. from video uploads)
+        null_sql = "SELECT COUNT(*) AS count FROM incidents WHERE camera_id IS NULL"
+        if today_only:
+            null_sql += " AND date(timestamp) = ?"
+        null_params = [today] if today_only else []
+        null_row = conn.execute(null_sql, null_params).fetchone()
+        if null_row and null_row["count"] > 0:
+            result.append({"camera_id": None, "camera_name": "Unknown / Video", "count": null_row["count"]})
+
+        # Sort by count descending so highest appears first
+        result.sort(key=lambda x: x["count"], reverse=True)
+        return result
     finally:
         conn.close()
 
